@@ -1,0 +1,32 @@
+[
+  {
+    "fixtureId": "mock-frame-001",
+    "appName": "SIMS",
+    "windowTitle": "Attendance marks and unexplained absence list",
+    "domain": null,
+    "activity": "attendance_review",
+    "visibleTextSummary": "An attendance officer is reviewing unexplained absences and preparing follow-up actions.",
+    "redactedSignals": ["unexplained absence list", "attendance marks", "follow-up preparation", "case review"],
+    "evidenceIds": ["fixture-evidence-001"]
+  },
+  {
+    "fixtureId": "mock-frame-002",
+    "appName": "Chrome",
+    "windowTitle": "Parent email templates",
+    "domain": "mail.google.com",
+    "activity": "parent_communication",
+    "visibleTextSummary": "The same attendance follow-up context appears in parent communication drafting.",
+    "redactedSignals": ["parent message template", "attendance follow-up", "manual drafting", "communication loop"],
+    "evidenceIds": ["fixture-evidence-002"]
+  },
+  {
+    "fixtureId": "mock-frame-003",
+    "appName": "Microsoft Excel",
+    "windowTitle": "Weekly attendance export reconciliation",
+    "domain": null,
+    "activity": "spreadsheet_reconciliation",
+    "visibleTextSummary": "Attendance information is being reconciled in a spreadsheet after switching from MIS and email.",
+    "redactedSignals": ["weekly attendance export", "spreadsheet reconciliation", "manual copy checks", "cross-system switching"],
+    "evidenceIds": ["fixture-evidence-003"]
+  }
+]
