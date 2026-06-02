@@ -136,16 +136,29 @@ In a headless or permission-limited environment, skip `make capture`; `make anal
 
 ## Skill Export
 
+Lucille writes at least three local skill proposals for each analysed pattern: a weekly report skill, a workflow automation queue, and a drafting/assistance skill. Hosted synthesis can produce a broader portfolio, but the local path is enough for an operator to review and generate useful skill bundles.
+
+Start the local web UI to edit proposals, generate tool-specific skill files, and download a JSON bundle containing the Claude, Codex, Cursor, and ChatGPT artifacts:
+
+```bash
+make ui DAY=2026-06-01
+```
+
+Open the printed local URL. The UI reads and writes:
+
+- `storage/analysis/<DAY>/skill-proposals.json`
+- `output/skills/<DAY>/<PROPOSAL_ID>/`
+
 Skill export is approval-gated. Preview planned files without writing tool-specific output:
 
 ```bash
-node dist/cli.js export --day 2026-05-30
+node dist/cli.js export --day 2026-05-30 --proposal-id skill-id
 ```
 
 Write the approved bundle explicitly:
 
 ```bash
-node dist/cli.js export --day 2026-05-30 --approve-export
+node dist/cli.js export --day 2026-05-30 --proposal-id skill-id --approve-export
 ```
 
 Approved exports are written under `output/skills/<DAY>/<PROPOSAL_ID>/`:

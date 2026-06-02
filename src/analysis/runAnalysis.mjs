@@ -368,7 +368,7 @@ function inferPatternTitle(signals, surfaces, activities) {
 function inferPatternSummary(signals, surfaces) {
   const signalText = signals.length > 0 ? signals.join("; ") : "structured frame evidence";
   const surfaceText = surfaces.length > 0 ? ` across ${surfaces.join(", ")}` : "";
-  return `The selected frames show a repeated work context${surfaceText}: ${signalText}.`;
+  return truncateText(`The selected frames show a repeated work context${surfaceText}: ${signalText}.`, 500);
 }
 
 function inferRecommendation(signals) {
@@ -386,19 +386,28 @@ function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
 }
 
+function truncateText(text, maxLength) {
+  return text.length > maxLength ? text.slice(0, maxLength - 1).trimEnd() + "." : text;
+}
+
 function buildSkillProposals(workPatterns, day, openaiProposals = null) {
   return {
     schemaVersion: "skill-proposals.v1",
     day,
-    proposals: openaiProposals ?? workPatterns.patterns.map((pattern) => buildLocalSkillProposal(pattern))
+    proposals: openaiProposals ?? workPatterns.patterns.flatMap((pattern) => buildLocalSkillProposals(pattern))
   };
 }
 
-function buildLocalSkillProposal(pattern) {
+function buildLocalSkillProposals(pattern) {
   const text = `${pattern.title} ${pattern.summary} ${pattern.signals.join(" ")}`.toLowerCase();
   const developmentWorkflow = text.includes("github") || text.includes("pull request") || text.includes("code");
   const reportWorkflow = text.includes("report");
   const attendanceWorkflow = text.includes("attendance") && !developmentWorkflow;
+  const slug = developmentWorkflow
+    ? "development-review-reporting"
+    : attendanceWorkflow
+      ? "attendance-report-review"
+      : slugify(pattern.title);
   const base = {
     status: "proposed",
     targetTools: ["Claude", "Codex", "Cursor", "ChatGPT"],
@@ -413,8 +422,8 @@ function buildLocalSkillProposal(pattern) {
     }
   };
 
-  if (developmentWorkflow) {
-    return {
+  const reportProposal = developmentWorkflow
+    ? {
       ...base,
       id: "skill-development-review-reporting-assistant",
       title: "Development review reporting assistant",
@@ -434,11 +443,9 @@ function buildLocalSkillProposal(pattern) {
         "Employee review before sharing",
         "Approved reporting categories for engineering and product work"
       ]
-    };
-  }
-
-  if (attendanceWorkflow) {
-    return {
+    }
+    : attendanceWorkflow
+      ? {
       ...base,
       id: "skill-attendance-report-review-assistant",
       title: "Attendance report review assistant",
@@ -458,10 +465,8 @@ function buildLocalSkillProposal(pattern) {
         "Redacted structured frame summaries",
         "Named report reviewer"
       ]
-    };
-  }
-
-  return {
+      }
+      : {
     ...base,
     id: `skill-${slugify(pattern.title)}-assistant`,
     title: `${pattern.title} assistant`,
@@ -482,6 +487,52 @@ function buildLocalSkillProposal(pattern) {
       "Approved reporting categories"
     ]
   };
+
+  const automationProposal = {
+    ...base,
+    id: `skill-${slug}-workflow-queue`,
+    title: `${reportProposal.title.replace(/ assistant$/i, "")} workflow queue`,
+    category: "workflow_automation",
+    summary: "Create a small review queue for the repeated visible workflow so follow-ups, blockers, owners, and next actions do not have to be reconstructed from scattered windows.",
+    implementationSteps: [
+      "Define queue fields for evidence ID, work surface, next action, owner, status, blocker, and due date.",
+      "Generate queue entries from the redacted frame summaries and ask the employee to approve or edit each one.",
+      "Group approved entries into review, communication, report QA, and engineering follow-up lanes.",
+      "Export the queue as a weekly action list for the employee or manager."
+    ],
+    expectedOutcome: "Repeated work moves from scattered context into a reviewed action queue with clear owners and statuses.",
+    owner: reportProposal.owner,
+    rolloutMetric: "Approved queue entries, follow-ups closed, blockers removed, and minutes saved from status reconstruction.",
+    prerequisites: [
+      "Approved queue fields",
+      "Employee review before sharing",
+      "A lightweight place to store weekly action status"
+    ]
+  };
+
+  const assistanceProposal = {
+    ...base,
+    id: `skill-${slug}-drafting-assistant`,
+    title: `${reportProposal.title.replace(/ assistant$/i, "")} drafting assistant`,
+    category: "ai_assistance",
+    summary: "Draft review-only notes, status updates, and next-step prompts from the visible workflow evidence without using raw screenshots or private document bodies.",
+    implementationSteps: [
+      "Turn each cited evidence summary into a short draft status note.",
+      "Ask the user to choose the audience: self, manager, teammate, or project channel.",
+      "Generate a concise draft with open questions, next actions, and confidence limits.",
+      "Require human review before sending or saving the draft."
+    ],
+    expectedOutcome: "The employee spends less time writing routine updates while keeping all generated text review-only.",
+    owner: reportProposal.owner,
+    rolloutMetric: "Drafts accepted, drafts edited, follow-up messages sent, and minutes saved per week.",
+    prerequisites: [
+      "Approved tone and audience rules",
+      "Employee review before sending",
+      "Evidence summaries for the current week"
+    ]
+  };
+
+  return [reportProposal, automationProposal, assistanceProposal];
 }
 
 function summarizeIntent(observation) {

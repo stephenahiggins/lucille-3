@@ -12,6 +12,7 @@ import { requestScreenCapturePermission, screenCaptureSettingsUrl } from "../src
 import { assertPrivacySafe } from "../src/privacy/safety.mjs";
 import { generateDailyReport } from "../src/reports/dailyReport.mjs";
 import { exportSkillProposal } from "../src/skills/exporters.mjs";
+import { createSkillUiServer } from "../src/ui/server.mjs";
 
 test("runAnalysis writes deterministic privacy-safe analysis artifacts", async () => {
   const root = fixtureRoot();
@@ -24,7 +25,7 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
 
   assert.equal(result.frameCount, 3);
   assert.equal(result.patternCount, 1);
-  assert.equal(result.proposalCount, 1);
+  assert.equal(result.proposalCount, 3);
   assert.equal(result.rawMediaLifecycle.action, "retained_by_default");
 
   const analysisDir = path.join(root, "storage", "analysis", "2026-05-30");
@@ -860,7 +861,8 @@ test("skill export previews proposed tool files without writing them", async () 
 
   const result = exportSkillProposal({
     root,
-    day: "2026-05-30"
+    day: "2026-05-30",
+    proposalId: "skill-attendance-report-review-assistant"
   });
 
   const expectedClaudePath = path.join(
@@ -900,7 +902,7 @@ test("weekly report writes privacy-safe Markdown from structured analysis artifa
   assert.equal(result.reportPath, path.join("output", "reports", "2026-05-30.md"));
   assert.equal(result.frameCount, 3);
   assert.equal(result.patternCount, 1);
-  assert.equal(result.proposalCount, 1);
+  assert.equal(result.proposalCount, 3);
   assert.match(report, /^# Lucille Weekly Efficiency Report: 2026-05-30/m);
   assert.match(report, /Estimated weekly time saving/);
   assert.match(report, /Organisation signal/);
@@ -930,6 +932,7 @@ test("approved skill export writes Claude Codex Cursor and ChatGPT bundles", asy
   const result = exportSkillProposal({
     root,
     day: "2026-05-30",
+    proposalId: "skill-attendance-report-review-assistant",
     approve: true
   });
 
@@ -979,6 +982,72 @@ test("approved skill export writes Claude Codex Cursor and ChatGPT bundles", asy
     chatgptKnowledge,
     chatgptActions
   }, "approvedSkillExport"));
+});
+
+test("skill web UI API edits generates and downloads skill proposals", async () => {
+  const root = fixtureRoot();
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b"
+  });
+
+  const server = createSkillUiServer({ root });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    const page = await fetch(`${baseUrl}/`);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /Lucille Skills/);
+
+    const loadedResponse = await fetch(`${baseUrl}/api/proposals?day=2026-05-30`);
+    assert.equal(loadedResponse.status, 200);
+    const loaded = await loadedResponse.json();
+    assert.equal(loaded.proposals.length, 3);
+
+    loaded.proposals[0].title = "Edited Attendance Report Review Assistant";
+    loaded.proposals[0].implementationSteps = [
+      ...loaded.proposals[0].implementationSteps.slice(0, 3),
+      "Confirm the edited skill still cites screenshot-backed evidence."
+    ];
+
+    const savedResponse = await fetch(`${baseUrl}/api/proposals?day=2026-05-30`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(loaded)
+    });
+    assert.equal(savedResponse.status, 200);
+    const saved = await savedResponse.json();
+    assert.equal(saved.proposals[0].title, "Edited Attendance Report Review Assistant");
+
+    const generateResponse = await fetch(`${baseUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        day: "2026-05-30",
+        proposalId: saved.proposals[0].id
+      })
+    });
+    assert.equal(generateResponse.status, 200);
+    const generated = await generateResponse.json();
+    assert.equal(generated.approved, true);
+    assert.equal(generated.filesWritten.length, 6);
+
+    const downloadResponse = await fetch(`${baseUrl}/api/download?day=2026-05-30&proposalId=${saved.proposals[0].id}`);
+    assert.equal(downloadResponse.status, 200);
+    assert.match(downloadResponse.headers.get("content-disposition"), /skill-bundle\.json/);
+    const bundle = await downloadResponse.json();
+    assert.equal(bundle.schemaVersion, "skill-download-bundle.v1");
+    assert.equal(bundle.files.length, 6);
+    assert.match(
+      bundle.files.find((file) => file.path.endsWith("codex/SKILL.md")).content,
+      /Edited Attendance Report Review Assistant/
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("privacy validator rejects forbidden persisted fields and query URLs", () => {
@@ -1498,9 +1567,11 @@ test("RALF status reports generated MMP workflow evidence separately from scaffo
     root,
     day: "2026-05-30"
   });
+  const proposalId = firstProposalId(root, "2026-05-30");
   exportSkillProposal({
     root,
     day: "2026-05-30",
+    proposalId,
     approve: true
   });
 
@@ -1597,9 +1668,11 @@ test("RALF status rejects operator smoke evidence when workflow artifacts are no
     root,
     day: "2026-05-30"
   });
+  const proposalId = firstProposalId(root, "2026-05-30");
   exportSkillProposal({
     root,
     day: "2026-05-30",
+    proposalId,
     approve: true
   });
   mkdirSync(path.join(root, "logs", "ralf"), { recursive: true });
@@ -1619,7 +1692,7 @@ test("RALF status rejects operator smoke evidence when workflow artifacts are no
         rawMediaFilesCaptured: 1,
         frameAnalysis: 1,
         report: "output/reports/2026-05-30.md",
-        approvedExport: "output/skills/2026-05-30/skill-attendance-report-review-assistant"
+        approvedExport: `output/skills/2026-05-30/${proposalId}`
       }
     }, null, 2) + "\n"
   );
@@ -1682,9 +1755,11 @@ test("RALF status accepts same-day Ollama smoke evidence with retained raw media
     root,
     day: "2026-05-30"
   });
+  const proposalId = firstProposalId(root, "2026-05-30");
   exportSkillProposal({
     root,
     day: "2026-05-30",
+    proposalId,
     approve: true
   });
   mkdirSync(path.join(root, "logs", "ralf"), { recursive: true });
@@ -1704,7 +1779,7 @@ test("RALF status accepts same-day Ollama smoke evidence with retained raw media
         rawMediaFilesCaptured: 1,
         frameAnalysis: 1,
         report: "output/reports/2026-05-30.md",
-        approvedExport: "output/skills/2026-05-30/skill-attendance-report-review-assistant"
+        approvedExport: `output/skills/2026-05-30/${proposalId}`
       }
     }, null, 2) + "\n"
   );
@@ -1767,9 +1842,11 @@ test("RALF status rejects unsafe approved export artifacts", async () => {
     root,
     day: "2026-05-30"
   });
+  const proposalId = firstProposalId(root, "2026-05-30");
   exportSkillProposal({
     root,
     day: "2026-05-30",
+    proposalId,
     approve: true
   });
 
@@ -1817,6 +1894,13 @@ function findExportedActionsPath(root, day) {
     if (existsSync(candidate)) return candidate;
   }
   throw new Error(`No exported actions.json found under ${skillsDir}`);
+}
+
+function firstProposalId(root, day) {
+  const proposals = JSON.parse(
+    readFileSync(path.join(root, "storage", "analysis", day, "skill-proposals.json"), "utf8")
+  );
+  return proposals.proposals[0].id;
 }
 
 function fixtureRoot() {

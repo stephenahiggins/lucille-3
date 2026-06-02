@@ -7,6 +7,7 @@ import { requestScreenCapturePermission } from "./capture/permissions.mjs";
 import { loadDotEnv } from "./config/env.mjs";
 import { generateDailyReport } from "./reports/dailyReport.mjs";
 import { exportSkillProposal } from "./skills/exporters.mjs";
+import { startSkillUiServer } from "./ui/server.mjs";
 
 loadDotEnv();
 
@@ -109,6 +110,20 @@ async function main(argv) {
     return;
   }
 
+  if (command === "ui") {
+    const flags = parseFlags([subcommand, ...rest].filter(Boolean));
+    const day = flags.day ?? today();
+    const result = await startSkillUiServer({
+      day,
+      port: flags.port ?? process.env.PORT ?? 4173,
+      host: flags.host ?? "127.0.0.1"
+    });
+
+    console.log(`Lucille skill UI running at ${result.url}`);
+    console.log(`Editing proposals for ${day}. Press Ctrl-C to stop.`);
+    return;
+  }
+
   if (command === "capture") {
     handleCapture(subcommand, rest);
     return;
@@ -178,6 +193,7 @@ Usage:
   lucille report --day YYYY-MM-DD
   lucille review --day YYYY-MM-DD
   lucille export --day YYYY-MM-DD [--proposal-id skill-id] [--approve-export]
+  lucille ui [--day YYYY-MM-DD] [--port 4173]
 
 Defaults are local-first. The analyse command uses provider=auto: local Ollama for real captured observations with day-scoped raw media, and deterministic mock analysis only for fixture-backed runs without captured observations. Real captures fail clearly instead of silently falling back to mock if raw media or Ollama is unavailable. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
 }

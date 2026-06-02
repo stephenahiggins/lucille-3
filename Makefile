@@ -11,18 +11,20 @@ REASONING_EFFORT ?= high
 DELETE_RAW_MEDIA ?= 0
 APPROVE_EXPORT ?= 0
 PROPOSAL ?=
+UI_PORT ?= 4173
 CODEX_BIN ?= codex
 NODE ?= node
 NPM ?= npm
 CLI ?= dist/cli.js
 
-.PHONY: help dirs build capture capture-permission capture-pause capture-resume capture-stop capture-once analyse report model-eval export-skill recording-dist dist-ui-recording operator-smoke-preflight operator-smoke status ralf ralf-mmp ralf-closeout
+.PHONY: help dirs build capture capture-permission capture-pause capture-resume capture-stop capture-once analyse report model-eval export-skill ui recording-dist dist-ui-recording operator-smoke-preflight operator-smoke status ralf ralf-mmp ralf-closeout
 
 help:
 	@echo "Lucille commands"
 	@echo "  make capture        # capture visible frames every $(CAPTURE_INTERVAL)s; Ctrl-C to stop"
 	@echo "  make analyse DAY=$(DAY) MODEL=$(MODEL) PROVIDER=$(PROVIDER) ANALYSE_LIMIT=$(ANALYSE_LIMIT) OPENAI=$(OPENAI)"
 	@echo "  make model-eval     # compare OpenAI models for weekly efficiency report quality"
+	@echo "  make ui             # edit, generate, and download skill proposals in a local web UI"
 
 dirs:
 	@mkdir -p logs/ralf storage output
@@ -125,6 +127,13 @@ export-skill: build
 		$(NODE) "$(CLI)" $$ARGS; \
 	else \
 		echo "Lucille CLI not found at $(CLI); skill export is unavailable until scaffolded."; \
+	fi
+
+ui: build
+	@if [ -f "$(CLI)" ]; then \
+		$(NODE) "$(CLI)" ui --day "$(DAY)" --port "$(UI_PORT)"; \
+	else \
+		echo "Lucille CLI not found at $(CLI); skill UI is unavailable until scaffolded."; \
 	fi
 
 dist-ui-recording: build

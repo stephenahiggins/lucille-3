@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { assertPrivacySafe } from "../privacy/safety.mjs";
 
@@ -43,6 +43,27 @@ export function readSkillProposalSet(options = {}) {
   const parsed = JSON.parse(readFileSync(proposalPath, "utf8"));
   const proposalSet = validateSkillProposalSet(parsed, { day, source: "skill-proposals.json" });
   assertPrivacySafe(proposalSet, "skillProposalSet");
+
+  return {
+    day,
+    proposalPath,
+    proposalSet,
+    proposals: proposalSet.proposals
+  };
+}
+
+export function writeSkillProposalSet(options = {}) {
+  const root = options.root ?? process.cwd();
+  const day = validateDay(options.day ?? options.proposalSet?.day);
+  const proposalPath = path.join(root, "storage", "analysis", day, "skill-proposals.json");
+  const proposalSet = validateSkillProposalSet(options.proposalSet, {
+    day,
+    source: "skillProposalSet"
+  });
+  assertPrivacySafe(proposalSet, "skillProposalSet");
+
+  mkdirSync(path.dirname(proposalPath), { recursive: true });
+  writeFileSync(proposalPath, JSON.stringify(proposalSet, null, 2) + "\n");
 
   return {
     day,
