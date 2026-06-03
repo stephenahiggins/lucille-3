@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { buildTaskSkillSummary } from "../analysis/taskSkillSummary.mjs";
 import { assertPrivacySafe } from "../privacy/safety.mjs";
 import { readSkillProposalSet, requiredTargetTools, selectSkillProposal } from "./proposals.mjs";
 
@@ -12,12 +13,17 @@ export function exportSkillProposal(options = {}) {
   });
   const proposal = selectSkillProposal(proposals, options.proposalId);
   const exportRoot = path.join(root, "output", "skills", day, proposal.id);
-  const artifacts = buildSkillArtifacts({ day, proposal, exportRoot });
+  const taskContexts = matchingTaskContexts({
+    proposal,
+    summary: buildTaskSkillSummary({ root, day })
+  });
+  const artifacts = buildSkillArtifacts({ day, proposal, exportRoot, taskContexts });
   const filesPlanned = artifacts.map((artifact) => path.relative(root, artifact.filePath));
 
   assertPrivacySafe({
     day,
     proposal,
+    taskContexts,
     filesPlanned,
     contents: artifacts.map((artifact) => artifact.content)
   }, "skillExportPlan");
@@ -54,38 +60,38 @@ export function exportSkillProposal(options = {}) {
   };
 }
 
-export function buildSkillArtifacts({ day, proposal, exportRoot }) {
+export function buildSkillArtifacts({ day, proposal, exportRoot, taskContexts = [] }) {
   const slug = proposal.id;
   const artifacts = [
     {
       target: "Claude",
       filePath: path.join(exportRoot, "claude", "SKILL.md"),
-      content: renderClaudeSkill({ day, proposal })
+      content: renderClaudeSkill({ day, proposal, taskContexts })
     },
     {
       target: "Codex",
       filePath: path.join(exportRoot, "codex", "SKILL.md"),
-      content: renderCodexSkill({ day, proposal })
+      content: renderCodexSkill({ day, proposal, taskContexts })
     },
     {
       target: "Cursor",
       filePath: path.join(exportRoot, "cursor", ".cursor", "rules", `${slug}.mdc`),
-      content: renderCursorRule({ day, proposal })
+      content: renderCursorRule({ day, proposal, taskContexts })
     },
     {
       target: "ChatGPT",
       filePath: path.join(exportRoot, "chatgpt", "instructions.md"),
-      content: renderChatGPTInstructions({ day, proposal })
+      content: renderChatGPTInstructions({ day, proposal, taskContexts })
     },
     {
       target: "ChatGPT",
       filePath: path.join(exportRoot, "chatgpt", "knowledge.md"),
-      content: renderChatGPTKnowledge({ day, proposal })
+      content: renderChatGPTKnowledge({ day, proposal, taskContexts })
     },
     {
       target: "ChatGPT",
       filePath: path.join(exportRoot, "chatgpt", "actions.json"),
-      content: renderChatGPTActions({ day, proposal })
+      content: renderChatGPTActions({ day, proposal, taskContexts })
     }
   ];
 
@@ -93,7 +99,7 @@ export function buildSkillArtifacts({ day, proposal, exportRoot }) {
   return artifacts;
 }
 
-function renderClaudeSkill({ day, proposal }) {
+function renderClaudeSkill({ day, proposal, taskContexts }) {
   return `${frontMatterComment(day, proposal)}
 # ${proposal.title}
 
@@ -119,6 +125,8 @@ Use this skill when the user asks for help with the repeated work pattern suppor
 ## Evidence IDs
 ${proposal.evidenceIds.map((id) => `- ${id}`).join("\n")}
 
+${renderRepeatedTaskContextMarkdown(taskContexts)}
+
 ## Confidence
 ${proposal.confidence}
 
@@ -132,7 +140,7 @@ Use redacted structured evidence only. Do not request screenshots, keystrokes, c
 `;
 }
 
-function renderCodexSkill({ day, proposal }) {
+function renderCodexSkill({ day, proposal, taskContexts }) {
   return `${frontMatterComment(day, proposal)}
 # ${proposal.title}
 
@@ -157,12 +165,14 @@ ${proposal.prerequisites.map((item) => `- ${item}`).join("\n")}
 ## Evidence IDs
 ${proposal.evidenceIds.map((id) => `- ${id}`).join("\n")}
 
+${renderRepeatedTaskContextMarkdown(taskContexts)}
+
 ## Codex Instructions
 Use this skill when helping implement, test, document, or package this Lucille recommendation. Keep changes local-first, evidence-grounded, and privacy-preserving. Do not add hidden capture, keystroke capture, clipboard capture, raw message bodies, raw document bodies, full URLs with query strings, or raw screenshot transmission.
 `;
 }
 
-function renderCursorRule({ day, proposal }) {
+function renderCursorRule({ day, proposal, taskContexts }) {
   return `---
 description: ${proposal.title}
 globs: []
@@ -187,11 +197,13 @@ ${proposal.prerequisites.map((item) => `- ${item}`).join("\n")}
 Evidence IDs: ${proposal.evidenceIds.join(", ")}
 Confidence: ${proposal.confidence}
 
+${renderRepeatedTaskContextMarkdown(taskContexts)}
+
 Use redacted structured evidence only. Do not capture keystrokes, clipboard contents, audio, raw document bodies, or raw message bodies.
 `;
 }
 
-function renderChatGPTInstructions({ day, proposal }) {
+function renderChatGPTInstructions({ day, proposal, taskContexts }) {
   return `${frontMatterComment(day, proposal)}
 # Instructions
 
@@ -205,11 +217,13 @@ Owner: ${proposal.owner}
 Category: ${proposal.category}
 Metric: ${proposal.rolloutMetric}
 
+${renderRepeatedTaskContextMarkdown(taskContexts)}
+
 Before acting, confirm the user wants the skill applied. Keep work local to the user's request and cite evidence IDs when explaining why the skill applies.
 `;
 }
 
-function renderChatGPTKnowledge({ day, proposal }) {
+function renderChatGPTKnowledge({ day, proposal, taskContexts }) {
   return `${frontMatterComment(day, proposal)}
 # Knowledge
 
@@ -228,11 +242,13 @@ Evidence IDs: ${proposal.evidenceIds.join(", ")}
 Confidence: ${proposal.confidence}
 Targets: ${proposal.targetTools.join(", ")}
 
+${renderRepeatedTaskContextMarkdown(taskContexts)}
+
 Privacy boundary: use redacted structured evidence only. Do not rely on screenshots, hidden monitoring, clipboard contents, audio, keystrokes, raw document bodies, or raw message bodies.
 `;
 }
 
-function renderChatGPTActions({ day, proposal }) {
+function renderChatGPTActions({ day, proposal, taskContexts }) {
   return JSON.stringify({
     schemaVersion: "chatgpt-actions-bundle.v1",
     day,
@@ -242,9 +258,54 @@ function renderChatGPTActions({ day, proposal }) {
     owner: proposal.owner,
     estimatedMinutesPerWeek: proposal.estimatedMinutesPerWeek,
     rolloutMetric: proposal.rolloutMetric,
+    repeatedTaskContexts: taskContexts.map((task) => ({
+      id: task.id,
+      title: task.title,
+      evidenceCount: task.evidenceCount,
+      evidenceIds: task.evidenceIds,
+      segmentCount: task.segmentCount,
+      dwellTimeSeconds: task.dwellTimeSeconds,
+      confidence: task.confidence,
+      topTasks: task.topTasks,
+      evidenceNarrative: task.evidenceNarrative
+    })),
     actions: [],
     note: "No external actions are configured for this local-first proposed skill export."
   }, null, 2) + "\n";
+}
+
+function matchingTaskContexts({ proposal, summary }) {
+  return summary.commonTasks
+    .map((task) => {
+      const matchingSkill = task.skills.find((skill) => skill.id === proposal.id);
+      return matchingSkill ? { ...task, overlap: matchingSkill.overlap } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => (
+      right.overlap - left.overlap ||
+      right.evidenceCount - left.evidenceCount ||
+      left.title.localeCompare(right.title)
+    ))
+    .slice(0, 3)
+    .map(({ skills, overlap, ...task }) => task);
+}
+
+function renderRepeatedTaskContextMarkdown(taskContexts) {
+  if (taskContexts.length === 0) {
+    return `## Repeated Task Context
+- No matching common task cluster was found. Use the proposal evidence IDs and ask the employee to confirm the repeated task before applying this skill.`;
+  }
+
+  return `## Repeated Task Context
+${taskContexts.map((task) => (
+    `### ${task.title}
+- Evidence coverage: ${task.evidenceCount} frame(s) across ${task.segmentCount} timeline segment(s)
+- Representative evidence IDs: ${task.evidenceIds.join(", ")}
+- Dwell time: ${task.dwellTimeSeconds} seconds
+- Confidence: ${task.confidence}
+- Key tasks: ${task.topTasks.join("; ")}
+- Why this skill helps: ${task.evidenceNarrative}`
+  )).join("\n\n")}`;
 }
 
 function frontMatterComment(day, proposal) {

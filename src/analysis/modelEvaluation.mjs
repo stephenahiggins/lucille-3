@@ -2,16 +2,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { buildEvidencePackage } from "./openaiSynthesis.mjs";
 import { runAnalysis } from "./runAnalysis.mjs";
+import { resolveEvaluationBaselineModel, resolveEvaluationModels } from "../config/models.mjs";
 import { assertPrivacySafe } from "../privacy/safety.mjs";
 
 const responsesEndpoint = "https://api.openai.com/v1/responses";
-const defaultModels = ["gpt-5.5"];
 
 export async function evaluateOpenAIModels(options = {}) {
   const root = options.root ?? process.cwd();
   const day = validateDay(options.day ?? today());
-  const models = normalizeModels(options.models ?? defaultModels);
-  const reasoningEffort = options.reasoningEffort ?? "high";
   const env = options.env ?? process.env;
   const apiKey = env.OPENAI_API_KEY;
 
@@ -19,11 +17,21 @@ export async function evaluateOpenAIModels(options = {}) {
     throw new Error("OPENAI_API_KEY is required for model evaluation.");
   }
 
+  const models = normalizeModels(resolveEvaluationModels({
+    value: options.models,
+    env
+  }));
+  const baselineModel = resolveEvaluationBaselineModel({
+    value: options.baselineModel,
+    env
+  });
+  const reasoningEffort = options.reasoningEffort ?? "high";
+
   await runAnalysis({
     root,
     day,
     provider: "mock",
-    model: "model-evaluation-baseline",
+    model: baselineModel,
     deleteRawMedia: false
   });
 

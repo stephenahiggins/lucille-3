@@ -4,15 +4,27 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import path from "node:path";
 import { validateObservations } from "../src/analysis/observations.mjs";
 import { requestScreenCapturePermission } from "../src/capture/permissions.mjs";
+import { loadDotEnv } from "../src/config/env.mjs";
+import { resolveLocalModel } from "../src/config/models.mjs";
 import { assertPrivacySafe } from "../src/privacy/safety.mjs";
+import { verifyMmpReadiness } from "./verify-mmp-readiness.mjs";
 
 const root = process.cwd();
+loadDotEnv({ root });
 const args = parseArgs(process.argv.slice(2));
 const day = validateDay(args.day ?? process.env.DAY ?? today());
-const model = args.model ?? process.env.MODEL ?? "moondream:1.8b";
 const provider = args.provider ?? process.env.PROVIDER ?? "ollama";
 const ack = args.ackRealCapture === true || process.env.LUCILLE_REAL_CAPTURE_ACK === "1";
 const preflight = args.preflight === true;
+const fromExistingEvidence = args.fromExistingEvidence === true;
+const captureCount = parsePositiveInteger(
+  args.captureCount ?? process.env.LUCILLE_OPERATOR_SMOKE_CAPTURE_COUNT ?? "3",
+  "capture-count"
+);
+const captureIntervalSeconds = parseNonNegativeInteger(
+  args.captureInterval ?? process.env.LUCILLE_OPERATOR_SMOKE_CAPTURE_INTERVAL ?? process.env.CAPTURE_INTERVAL ?? "3",
+  "capture-interval"
+);
 const make = process.env.MAKE ?? "make";
 const ollamaEndpoint = normalizeEndpoint(process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434");
 
@@ -25,6 +37,7 @@ try {
 
 function main() {
   if (preflight) {
+    const model = resolveLocalModel({ value: args.model ?? process.env.MODEL });
     if (provider !== "ollama") {
       throw new Error("operator-smoke preflight requires PROVIDER=ollama so local visual provider checks are real.");
     }
@@ -32,6 +45,26 @@ function main() {
     run(make, ["build"]);
     awaitLocalVisualProvider({ endpoint: ollamaEndpoint, model });
     console.log(`operator-smoke preflight passed for Ollama model ${model}. No capture was run and no smoke evidence was written.`);
+    return;
+  }
+
+  if (fromExistingEvidence) {
+    const model = resolveLocalModel({ value: args.model ?? process.env.MODEL });
+    if (provider !== "ollama") {
+      throw new Error("operator-smoke existing evidence mode requires PROVIDER=ollama so local visual provider evidence is real.");
+    }
+
+    run(make, ["build"]);
+    awaitLocalVisualProvider({ endpoint: ollamaEndpoint, model });
+    run(make, ["verify-mmp", `DAY=${day}`]);
+    writeSmokeRecord({
+      model,
+      captureMode: "existing_day_evidence",
+      captureEvidence: validateCaptureEvidence(day),
+      workflowEvidence: validateWorkflowEvidence({ day, model }),
+      mmpReadiness: verifyMmpReadiness({ root, day })
+    });
+    console.log(`operator-smoke recorded existing validated evidence for ${day} without new capture.`);
     return;
   }
 
@@ -46,27 +79,53 @@ function main() {
   }
 
   run(make, ["build"]);
+  const model = resolveLocalModel({ value: args.model ?? process.env.MODEL });
   awaitLocalVisualProvider({ endpoint: ollamaEndpoint, model });
   requireScreenCapturePermission();
 
-  run(make, ["capture-once", `DAY=${day}`], { LUCILLE_REAL_CAPTURE_ACK: "1" });
+  captureSmokeSequence({ day, count: captureCount, intervalSeconds: captureIntervalSeconds });
 
   const captureEvidence = validateCaptureEvidence(day);
 
   run(make, ["analyse", `DAY=${day}`, `PROVIDER=${provider}`, `MODEL=${model}`]);
   run(make, ["report", `DAY=${day}`]);
   run(make, ["export-skill", `DAY=${day}`, "APPROVE_EXPORT=1"]);
+  run(make, ["verify-mmp", `DAY=${day}`]);
 
-  const workflowEvidence = validateWorkflowEvidence({ day, model });
+  writeSmokeRecord({
+    model,
+    captureMode: "fresh_capture_sequence",
+    captureEvidence,
+    workflowEvidence: validateWorkflowEvidence({ day, model }),
+    mmpReadiness: verifyMmpReadiness({ root, day })
+  });
+
+  console.log(`operator-smoke completed for ${day} with real capture and local Ollama analysis.`);
+}
+
+function writeSmokeRecord({ model, captureMode, captureEvidence, workflowEvidence, mmpReadiness }) {
   const smoke = {
     schemaVersion: "operator-smoke.v1",
     day,
     completedAt: new Date().toISOString(),
+    captureMode,
     realCaptureIngestion: true,
     localVisualProvider: true,
     privacyReview: true,
     provider,
     model,
+    captureCountRequested: captureCount,
+    captureIntervalSeconds,
+    mmpReady: mmpReadiness.ready,
+    mmpReadiness: {
+      frameCount: mmpReadiness.frameCount,
+      commonTaskCount: mmpReadiness.commonTaskCount,
+      taskSkillSummaryCount: mmpReadiness.taskSkillSummaryCount,
+      repeatedTaskFrameCount: mmpReadiness.repeatedTaskFrameCount,
+      patternCount: mmpReadiness.patternCount,
+      proposalCount: mmpReadiness.proposalCount,
+      proposalCategories: mmpReadiness.proposalCategories
+    },
     evidence: {
       observations: captureEvidence.observations,
       rawMediaFilesCaptured: captureEvidence.rawMediaFilesCaptured,
@@ -82,8 +141,19 @@ function main() {
     path.join(root, "logs", "ralf", "operator-smoke.json"),
     JSON.stringify(smoke, null, 2) + "\n"
   );
+}
 
-  console.log(`operator-smoke completed for ${day} with real capture and local Ollama analysis.`);
+function captureSmokeSequence({ day: smokeDay, count, intervalSeconds }) {
+  for (let index = 0; index < count; index += 1) {
+    run(make, ["capture-once", `DAY=${smokeDay}`], { LUCILLE_REAL_CAPTURE_ACK: "1" });
+    if (index < count - 1 && intervalSeconds > 0) {
+      sleepSeconds(intervalSeconds);
+    }
+  }
+}
+
+function sleepSeconds(seconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
 }
 
 function requireScreenCapturePermission() {
@@ -226,7 +296,7 @@ function validateWorkflowEvidence({ day: workflowDay, model: expectedModel }) {
     throw new Error("Raw media files were deleted even though deletion was not explicitly requested.");
   }
 
-  if (!existsSync(reportPath) || !readFileSync(reportPath, "utf8").startsWith(`# Lucille Daily Report: ${workflowDay}`)) {
+  if (!existsSync(reportPath) || !readFileSync(reportPath, "utf8").startsWith(`# Lucille Weekly Efficiency Report: ${workflowDay}`)) {
     throw new Error(`No generated daily report found for ${workflowDay}.`);
   }
   assertPrivacySafe(readFileSync(reportPath, "utf8"), "operatorSmoke.reportMarkdown");
@@ -321,7 +391,7 @@ function parseArgs(argv) {
     }
     const [rawName, inlineValue] = arg.slice(2).split("=", 2);
     const name = rawName.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    if (name === "ackRealCapture" || name === "preflight") {
+    if (name === "ackRealCapture" || name === "preflight" || name === "fromExistingEvidence") {
       flags[name] = true;
       continue;
     }
@@ -340,6 +410,22 @@ function validateDay(value) {
     throw new Error(`Invalid day "${value}". Expected YYYY-MM-DD.`);
   }
   return value;
+}
+
+function parsePositiveInteger(value, label) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeInteger(value, label) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative integer.`);
+  }
+  return parsed;
 }
 
 function normalizeEndpoint(endpoint) {

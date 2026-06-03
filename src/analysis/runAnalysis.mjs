@@ -5,23 +5,27 @@ import {
   analyseObservationWithOllama,
   isLocalVisualProviderUnavailable
 } from "./ollamaProvider.mjs";
+import { buildActivityTimeline } from "./activityTimeline.mjs";
 import { synthesizeWithOpenAI } from "./openaiSynthesis.mjs";
+import { buildTaskSkillSummaryFromArtifacts } from "./taskSkillSummary.mjs";
 import { validateObservations } from "./observations.mjs";
 import { applyRawMediaLifecycle } from "../capture/rawMediaLifecycle.mjs";
+import { resolveLocalModel, resolveOpenAIModel } from "../config/models.mjs";
 import {
   defaultExcludedApps,
   defaultExcludedDomains,
   observationExclusionReason
 } from "../privacy/exclusions.mjs";
 import { assertPrivacySafe, privacyRedactions } from "../privacy/safety.mjs";
+import { validateSkillProposalSet } from "../skills/proposals.mjs";
 
 const defaultOptions = {
-  model: "moondream:1.8b",
+  model: null,
   provider: "auto",
   limit: null,
   offset: 0,
   openai: false,
-  openaiModel: "gpt-5.5",
+  openaiModel: null,
   reasoningEffort: "high",
   deleteRawMedia: false,
   env: process.env,
@@ -32,7 +36,10 @@ const defaultOptions = {
 export async function runAnalysis(options = {}) {
   const config = { ...defaultOptions, ...options };
   const day = validateDay(config.day ?? today());
-  const model = validateNonEmpty(config.model, "model");
+  const model = validateNonEmpty(resolveLocalModel({
+    value: config.model,
+    env: config.env
+  }), "model");
   const provider = validateProvider(config.provider ?? config.env.LUCILLE_ANALYSIS_PROVIDER ?? "auto");
   const offset = validateNonNegativeInteger(config.offset ?? 0, "offset");
   const limit = config.limit === null || config.limit === undefined || config.limit === ""
@@ -42,6 +49,14 @@ export async function runAnalysis(options = {}) {
   if (config.openai && !config.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is required when --openai is enabled.");
   }
+  const openaiModel = config.openai
+    ? validateNonEmpty(resolveOpenAIModel({
+      value: config.openaiModel,
+      env: config.env
+    }), "openaiModel")
+    : config.openaiModel
+      ? validateNonEmpty(config.openaiModel, "openaiModel")
+      : null;
 
   const observationSource = loadObservations(config.root, day);
   const structuredObservations = applyObservationChunk(
@@ -79,12 +94,18 @@ export async function runAnalysis(options = {}) {
   });
   assertPrivacySafe(rawMediaLifecycle, "rawMediaLifecycle");
 
-  const localWorkPatterns = buildWorkPatterns(frameAnalysis, {
+  const activityTimeline = buildActivityTimeline({
+    day,
+    frames: frameAnalysis
+  });
+  assertPrivacySafe(activityTimeline, "activityTimeline");
+
+  const localWorkPatterns = buildWorkPatterns(activityTimeline, {
     day,
     model,
     provider: localProvider,
     openai: config.openai,
-    openaiModel: config.openaiModel,
+    openaiModel,
     reasoningEffort: config.reasoningEffort,
     rawMediaLifecycle
   });
@@ -92,8 +113,9 @@ export async function runAnalysis(options = {}) {
   const openaiSynthesis = config.openai
     ? await synthesizeWithOpenAI({
       frames: frameAnalysis,
+      activityTimeline,
       day,
-      model: config.openaiModel,
+      model: openaiModel,
       reasoningEffort: config.reasoningEffort,
       env: config.env,
       fetchImpl: config.fetchImpl,
@@ -101,34 +123,47 @@ export async function runAnalysis(options = {}) {
     })
     : null;
 
-  const workPatterns = buildWorkPatterns(frameAnalysis, {
+  const workPatterns = buildWorkPatterns(activityTimeline, {
     day,
     model,
     provider: localProvider,
     openai: config.openai,
-    openaiModel: config.openaiModel,
+    openaiModel,
     reasoningEffort: config.reasoningEffort,
     rawMediaLifecycle,
     openaiSynthesis
   });
   assertPrivacySafe(workPatterns, "workPatterns");
 
-  const skillProposals = buildSkillProposals(workPatterns, day, openaiSynthesis?.proposals);
+  const skillProposals = validateSkillProposalSet(
+    buildSkillProposals(workPatterns, day, openaiSynthesis?.proposals),
+    { day, source: "skillProposals" }
+  );
   assertPrivacySafe(skillProposals, "skillProposals");
+  const taskSkillSummary = buildTaskSkillSummaryFromArtifacts({
+    day,
+    activityTimeline,
+    proposalSet: skillProposals
+  });
+  assertPrivacySafe(taskSkillSummary, "taskSkillSummary");
 
   writeFileSync(
     path.join(analysisDir, "frame-analysis.jsonl"),
     frameAnalysis.map((frame) => JSON.stringify(frame)).join("\n") + "\n"
   );
+  writeJson(path.join(analysisDir, "activity-timeline.json"), activityTimeline);
   writeJson(path.join(analysisDir, "work-patterns.json"), workPatterns);
   writeJson(path.join(analysisDir, "skill-proposals.json"), skillProposals);
+  writeJson(path.join(analysisDir, "task-skill-summary.json"), taskSkillSummary);
 
   return {
     day,
     analysisDir,
     frameCount: frameAnalysis.length,
+    timelineSegmentCount: activityTimeline.segments.length,
     patternCount: workPatterns.patterns.length,
     proposalCount: skillProposals.proposals.length,
+    commonTaskCount: taskSkillSummary.commonTasks.length,
     provider: localProvider,
     rawMediaLifecycle
   };
@@ -282,6 +317,11 @@ function analyseObservationWithMock(observation, context) {
     },
     activities: [observation.activity],
     visibleIntent: summarizeIntent(observation),
+    keyTasks: inferFrameKeyTasks([
+      observation.activity,
+      observation.visibleTextSummary,
+      ...observation.redactedSignals
+    ].join(" ")),
     evidence: observation.redactedSignals.map((signal, index) => ({
       id: observation.evidenceIds[index] ?? `${observation.id}-signal-${String(index + 1).padStart(2, "0")}`,
       kind: "redacted_visible_summary",
@@ -296,9 +336,7 @@ function primaryScreenshotEvidenceId(observation, context) {
   return observation.evidenceIds[0] ?? `${observation.id}-raw-frame-${String(context.evidenceNumber).padStart(3, "0")}`;
 }
 
-function buildWorkPatterns(frames, context) {
-  const evidenceIds = frames.map((frame) => frame.evidenceId);
-  const signals = [...new Set(frames.flatMap((frame) => frame.evidence.map((item) => item.summary)))];
+function buildWorkPatterns(activityTimeline, context) {
   const openaiSynthesis = context.openaiSynthesis ?? null;
 
   return {
@@ -322,64 +360,93 @@ function buildWorkPatterns(frames, context) {
       evidencePolicy: openaiSynthesis?.evidencePolicy ?? "redacted_structured_evidence_only",
       rawMediaLifecycle: context.rawMediaLifecycle
     },
-    patterns: openaiSynthesis?.patterns ?? buildLocalPatterns(frames, signals)
+    patterns: openaiSynthesis?.patterns ?? buildLocalPatternsFromTimeline(activityTimeline)
   };
 }
 
-function buildLocalPatterns(frames, signals) {
-  const evidenceIds = frames.map((frame) => frame.evidenceId);
-  const surfaces = [...new Set(frames.map((frame) => frame.surface.appName).filter(Boolean))];
-  const activities = [...new Set(frames.flatMap((frame) => frame.activities).filter(Boolean))];
-  const normalizedSignals = signals.slice(0, 8);
+function buildLocalPatternsFromTimeline(activityTimeline) {
+  const tasks = [...activityTimeline.commonTasks].sort((left, right) => (
+    taskFrictionScore(right) - taskFrictionScore(left)
+  ));
+  const usedIds = new Set();
 
-  return [
-    {
-      id: `pattern-${slugify(inferPatternTitle(normalizedSignals, surfaces, activities))}`,
-      title: inferPatternTitle(normalizedSignals, surfaces, activities),
-      summary: inferPatternSummary(normalizedSignals, surfaces),
-      repeatedAcrossEvidence: evidenceIds,
-      confidence: confidenceFor(frames.length),
-      signals: normalizedSignals,
-      estimatedMinutesPerWeek: estimateWeeklySavingMinutes(frames.length, normalizedSignals.length),
-      recommendation: inferRecommendation(normalizedSignals),
-      enterpriseSignal: "Track this as an evidence-backed AI transformation opportunity by measuring repeated manual steps, context switching, accepted AI assistance, and weekly minutes saved.",
-      privacyBoundary: "Uses frame summaries and evidence IDs only; no screenshots, keystrokes, clipboard, audio, raw document bodies, or raw message bodies are stored."
-    }
-  ];
+  return tasks.slice(0, 5).map((task) => {
+    const id = uniquePatternId(task.title, usedIds);
+    const signals = unique([
+      ...task.cognitiveHurdles,
+      ...task.commonActions,
+      ...task.recommendationSeeds
+    ]).slice(0, 12);
+
+    return {
+      id,
+      title: task.title,
+      summary: inferPatternSummaryFromTask(task),
+      repeatedAcrossEvidence: task.evidenceIds,
+      evidenceCount: task.frameCount,
+      segmentCount: task.segmentCount,
+      confidence: task.confidence,
+      signals,
+      estimatedMinutesPerWeek: estimateWeeklySavingMinutesFromTask(task),
+      recommendation: inferRecommendationFromTask(task),
+      enterpriseSignal: truncateText(
+        `Track this common task as an evidence-backed AI transformation opportunity by measuring total dwell time (${task.totalDwellTimeSeconds} seconds), repeated segments (${task.segmentCount}), surface switches (${task.surfaceSwitchCount}), accepted recommendations, and weekly minutes saved.`,
+        400
+      ),
+      privacyBoundary: "Uses common task clusters, activity timeline segments, evidence IDs, and bounded visible text snippets only; no screenshots, hidden input capture, clipboard, audio, raw document bodies, or raw message bodies are stored."
+    };
+  });
 }
 
-function inferPatternTitle(signals, surfaces, activities) {
-  const text = `${signals.join(" ")} ${surfaces.join(" ")} ${activities.join(" ")}`.toLowerCase();
-  if (text.includes("github") || text.includes("pull request") || text.includes("code")) {
-    return "Development review and reporting workflow";
+function uniquePatternId(title, usedIds) {
+  const base = `pattern-${slugify(title)}`;
+  let candidate = base;
+  let suffix = 2;
+  while (usedIds.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
   }
-  if (text.includes("attendance")) {
-    return "Attendance report review workflow";
-  }
-  if (text.includes("report")) {
-    return "Report building and review workflow";
-  }
-  if (text.includes("chat") || text.includes("slack") || text.includes("discord")) {
-    return "Collaboration and context-switching workflow";
-  }
-  return "Repeated desktop workflow";
+  usedIds.add(candidate);
+  return candidate;
 }
 
-function inferPatternSummary(signals, surfaces) {
-  const signalText = signals.length > 0 ? signals.join("; ") : "structured frame evidence";
-  const surfaceText = surfaces.length > 0 ? ` across ${surfaces.join(", ")}` : "";
-  return truncateText(`The selected frames show a repeated work context${surfaceText}: ${signalText}.`, 500);
+function taskFrictionScore(task) {
+  return (
+    task.totalDwellTimeSeconds +
+    task.surfaceSwitchCount * 60 +
+    task.cognitiveHurdles.length * 45 +
+    task.segmentCount * 30 +
+    task.frameCount * 10
+  );
 }
 
-function inferRecommendation(signals) {
-  const text = signals.join(" ").toLowerCase();
-  if (text.includes("github") || text.includes("pull request") || text.includes("code")) {
-    return "Create an AI-assisted weekly engineering workflow report that summarizes active PR review, team discussion, report testing, and follow-up actions from cited frame evidence.";
-  }
-  if (text.includes("report")) {
-    return "Create an AI-assisted report QA checklist that summarizes visible report-building steps, flags unfinished sections, and proposes next actions for review.";
-  }
-  return "Create an AI-assisted weekly efficiency note that summarizes the observed repeated workflow, identifies context switching, and proposes one reviewable automation or drafting aid.";
+function inferPatternSummaryFromTask(task) {
+  const hurdle = task.cognitiveHurdles[0] ?? "the work needs clearer next steps";
+  return truncateText(
+    `Lucille clustered ${task.frameCount} screenshot-backed frame(s) across ${task.segmentCount} timeline segment(s) into one repeated task: ${task.userIntent} The main cognitive hurdle is that ${hurdle.toLowerCase()}.`,
+    500
+  );
+}
+
+function inferRecommendationFromTask(task) {
+  const seed = task.recommendationSeeds[0] ?? "Generate a reviewable AI assistance experiment for this workflow";
+  const hurdle = task.cognitiveHurdles[0] ?? "the next action is not obvious from scattered work surfaces";
+  return truncateText(
+    `${seed}. Focus the recommendation on overcoming this repeated-task hurdle: ${hurdle.toLowerCase()}. Cite ${task.evidenceIds.join(", ")} so the employee can approve or correct the interpretation.`,
+    600
+  );
+}
+
+function estimateWeeklySavingMinutesFromTask(task) {
+  const dwellEstimate = Math.round(task.totalDwellTimeSeconds / 4);
+  const switchEstimate = task.surfaceSwitchCount * 12;
+  const hurdleEstimate = task.cognitiveHurdles.length * 10;
+  const repetitionEstimate = Math.max(0, task.segmentCount - 1) * 18;
+  return Math.min(300, Math.max(30, dwellEstimate + switchEstimate + hurdleEstimate + repetitionEstimate));
+}
+
+function unique(values) {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.trim() !== ""))];
 }
 
 function slugify(text) {
@@ -391,18 +458,100 @@ function truncateText(text, maxLength) {
 }
 
 function buildSkillProposals(workPatterns, day, openaiProposals = null) {
+  const proposals = openaiProposals ?? [
+    ...workPatterns.patterns.flatMap((pattern) => buildLocalSkillProposals(pattern)),
+    ...buildPortfolioSkillProposals(workPatterns.patterns)
+  ];
   return {
     schemaVersion: "skill-proposals.v1",
     day,
-    proposals: openaiProposals ?? workPatterns.patterns.flatMap((pattern) => buildLocalSkillProposals(pattern))
+    proposals: ensureUniqueProposalIds(proposals)
   };
+}
+
+function buildPortfolioSkillProposals(patterns) {
+  if (patterns.length === 0) return [];
+  const evidenceIds = unique(patterns.flatMap((pattern) => pattern.repeatedAcrossEvidence));
+  const totalMinutes = patterns.reduce((sum, pattern) => sum + pattern.estimatedMinutesPerWeek, 0);
+  const totalEvidenceCount = patterns.reduce((sum, pattern) => sum + (pattern.evidenceCount ?? pattern.repeatedAcrossEvidence.length), 0);
+  const averageConfidence = Number((patterns.reduce((sum, pattern) => sum + pattern.confidence, 0) / patterns.length).toFixed(2));
+  const topPatterns = patterns.slice(0, 3);
+  const evidenceSummary = formatEvidenceList(evidenceIds);
+  const patternSummary = topPatterns.map((pattern) => pattern.title).join("; ");
+  const hurdleSummary = unique(patterns.flatMap((pattern) => pattern.signals))
+    .filter((signal) => /hurdle|dwell|burden|switch|blocked|unresolved|manual|reconciliation|command|sensitive|connecting/i.test(signal))
+    .slice(0, 4)
+    .join("; ") || "repeated work needs clearer ownership, status, and AI assistance choices";
+  const base = {
+    status: "proposed",
+    targetTools: ["Claude", "Codex", "Cursor", "ChatGPT"],
+    estimatedMinutesPerWeek: Math.max(30, Math.round(totalMinutes / Math.max(1, patterns.length))),
+    evidenceIds,
+    confidence: averageConfidence,
+    exportPlan: {
+      claude: "SKILL.md package not written until approved",
+      codex: "Codex SKILL.md package not written until approved",
+      cursor: ".cursor/rules/*.mdc not written until approved",
+      chatgpt: "instructions/knowledge/actions bundle not written until approved"
+    }
+  };
+
+  return [
+    {
+      ...base,
+      id: "skill-ai-transformation-manager-dashboard",
+      title: "AI transformation manager dashboard",
+      category: "manager_monitoring",
+      summary: truncateText(`Give managers a weekly view of ${totalEvidenceCount} repeated-task frame(s), represented by ${evidenceSummary}, showing where AI skills could reduce friction without exposing raw screenshots.`, 500),
+      implementationSteps: [
+        `Roll up common tasks (${patternSummary}) into manager-visible categories with evidence counts, confidence, estimated minutes, and owner.`,
+        `Highlight the top cognitive hurdles: ${truncateText(hurdleSummary, 180)}.`,
+        "Track accepted, corrected, rejected, and pending skill recommendations by team and week.",
+        "Show privacy status for each cluster: redacted structured evidence only, employee review required, no hidden input capture.",
+        "Escalate only aggregate opportunity metrics unless the employee approves a specific recommendation for sharing."
+      ],
+      expectedOutcome: "Managers can monitor AI transformation opportunities across repeated work while keeping employee-level evidence reviewable and privacy-bounded.",
+      owner: "Team manager or transformation lead",
+      rolloutMetric: "Common tasks reviewed, recommendations accepted, estimated minutes saved, and team-level rollout blockers cleared.",
+      prerequisites: [
+        "Approved team reporting policy",
+        "Employee review workflow for recommendations",
+        "Common task categories mapped to teams or functions"
+      ]
+    },
+    {
+      ...base,
+      id: "skill-enterprise-ai-rollout-readiness",
+      title: "Enterprise AI rollout readiness",
+      category: "enterprise_rollout",
+      summary: truncateText(`Turn ${totalEvidenceCount} repeated-task frame(s), represented by ${evidenceSummary}, into an enterprise rollout backlog that prioritizes high-confidence skills, governance needs, and measurable weekly savings.`, 500),
+      implementationSteps: [
+        "Group repeated-task clusters into enterprise rollout themes such as reporting, workflow queues, drafting, troubleshooting, and quality review.",
+        "Score each theme by evidence count, confidence, estimated weekly minutes saved, privacy sensitivity, and manager readiness.",
+        "Define rollout stages: pilot, employee-reviewed, manager-monitored, policy-approved, and scaled.",
+        "Create a governance checklist for approved tools, redaction boundaries, review ownership, and success metrics.",
+        "Publish a weekly transformation summary that separates employee assistance, manager monitoring, and enterprise rollout decisions."
+      ],
+      expectedOutcome: "Leadership gets a practical AI transformation backlog grounded in repeated work evidence rather than consultant-style speculation.",
+      owner: "AI transformation owner",
+      rolloutMetric: "Pilot skills launched, teams onboarded, governance checks completed, and cumulative minutes saved per week.",
+      prerequisites: [
+        "Named enterprise transformation owner",
+        "Approved AI tool policy",
+        "Manager dashboard categories and privacy review gates"
+      ]
+    }
+  ];
 }
 
 function buildLocalSkillProposals(pattern) {
   const text = `${pattern.title} ${pattern.summary} ${pattern.signals.join(" ")}`.toLowerCase();
-  const developmentWorkflow = text.includes("github") || text.includes("pull request") || text.includes("code");
+  const titleText = pattern.title.toLowerCase();
+  const attendanceWorkflow = titleText.includes("attendance") || (text.includes("attendance") && !/\b(github|pull request|code|terminal|console)\b/.test(titleText));
+  const developmentWorkflow = !attendanceWorkflow && (text.includes("github") || text.includes("pull request") || text.includes("code"));
   const reportWorkflow = text.includes("report");
-  const attendanceWorkflow = text.includes("attendance") && !developmentWorkflow;
+  const cognitiveHurdle = truncateText(inferCognitiveHurdleForProposal(pattern), 150);
+  const timelineEvidence = formatEvidenceList(pattern.repeatedAcrossEvidence);
   const slug = developmentWorkflow
     ? "development-review-reporting"
     : attendanceWorkflow
@@ -428,14 +577,15 @@ function buildLocalSkillProposals(pattern) {
       id: "skill-development-review-reporting-assistant",
       title: "Development review reporting assistant",
       category: "employee_weekly_report",
-      summary: pattern.recommendation,
+      summary: truncateText(pattern.recommendation, 500),
       implementationSteps: [
-        "Summarize the visible GitHub pull request, team discussion, report page, terminal activity, and open work surfaces from cited evidence.",
+        `Summarize repeated-task evidence ${timelineEvidence}: dwell time, visible engineering surfaces, actions, and intent.`,
+        `Name the cognitive hurdle to overcome: ${cognitiveHurdle}.`,
         "Generate a weekly engineering workflow note with completed review activity, unresolved follow-ups, and likely context-switching points.",
         "Draft a concise manager-ready update that separates product/report testing, code review, collaboration, and capture-tool work.",
         "Ask the employee to approve or correct each recommendation before any team-level reporting."
       ],
-      expectedOutcome: "Engineering and product staff get an evidence-backed weekly efficiency report without inventing non-visible workflows.",
+      expectedOutcome: "Engineering and product staff get an evidence-backed weekly efficiency report that explains the visible hurdle and next AI-assisted action.",
       owner: "Engineer or product owner reviewing the weekly report",
       rolloutMetric: "Accepted weekly recommendations, unresolved PR/report follow-ups closed, and minutes saved from reduced status reconstruction.",
       prerequisites: [
@@ -449,11 +599,12 @@ function buildLocalSkillProposals(pattern) {
       ...base,
       id: "skill-attendance-report-review-assistant",
       title: "Attendance report review assistant",
-      category: "ai_assistance",
-      summary: pattern.recommendation,
+      category: "employee_weekly_report",
+      summary: truncateText(pattern.recommendation, 500),
       implementationSteps: [
-        "Summarize the visible attendance report sections and charts from cited evidence.",
-        "Generate a review checklist for report completeness, chart interpretation, and next questions.",
+        `Summarize repeated-task evidence ${timelineEvidence}: report review, follow-up drafting, reconciliation, and dwell time.`,
+        `Name the cognitive hurdle to overcome: ${cognitiveHurdle}.`,
+        "Generate a review checklist for report completeness, chart interpretation, follow-up questions, and reconciliation checks.",
         "Draft follow-up notes for the report owner without transcribing raw student data.",
         "Require human approval before using any generated message or report update."
       ],
@@ -471,10 +622,11 @@ function buildLocalSkillProposals(pattern) {
     id: `skill-${slugify(pattern.title)}-assistant`,
     title: `${pattern.title} assistant`,
     category: reportWorkflow ? "employee_weekly_report" : "ai_assistance",
-    summary: pattern.recommendation,
+    summary: truncateText(pattern.recommendation, 500),
     implementationSteps: [
-      "Summarize the observed workflow from cited evidence only.",
-      "Identify repeated manual steps and context switching visible in the frame summaries.",
+      `Summarize repeated-task evidence ${timelineEvidence}: intent, actions, dwell time, and friction signals.`,
+      `Name the cognitive hurdle to overcome: ${cognitiveHurdle}.`,
+      "Identify repeated manual steps and context switching visible in the timeline.",
       "Propose one reviewable AI assistance experiment for the next week.",
       "Record employee approval, corrections, and estimated minutes saved."
     ],
@@ -493,12 +645,12 @@ function buildLocalSkillProposals(pattern) {
     id: `skill-${slug}-workflow-queue`,
     title: `${reportProposal.title.replace(/ assistant$/i, "")} workflow queue`,
     category: "workflow_automation",
-    summary: "Create a small review queue for the repeated visible workflow so follow-ups, blockers, owners, and next actions do not have to be reconstructed from scattered windows.",
+    summary: truncateText(`Create a small review queue for the repeated task cited by ${timelineEvidence} so the user can overcome this hurdle: ${cognitiveHurdle.toLowerCase()}.`, 500),
     implementationSteps: [
-      "Define queue fields for evidence ID, work surface, next action, owner, status, blocker, and due date.",
-      "Generate queue entries from the redacted frame summaries and ask the employee to approve or edit each one.",
+      "Define queue fields for common task ID, segment IDs, evidence IDs, work surface, next action, owner, status, blocker, and due date.",
+      "Generate queue entries from repeated-task actions and ask the employee to approve or edit each one.",
       "Group approved entries into review, communication, report QA, and engineering follow-up lanes.",
-      "Export the queue as a weekly action list for the employee or manager."
+      "Export the queue as a weekly action list that keeps the cited cognitive hurdle visible until resolved."
     ],
     expectedOutcome: "Repeated work moves from scattered context into a reviewed action queue with clear owners and statuses.",
     owner: reportProposal.owner,
@@ -515,9 +667,9 @@ function buildLocalSkillProposals(pattern) {
     id: `skill-${slug}-drafting-assistant`,
     title: `${reportProposal.title.replace(/ assistant$/i, "")} drafting assistant`,
     category: "ai_assistance",
-    summary: "Draft review-only notes, status updates, and next-step prompts from the visible workflow evidence without using raw screenshots or private document bodies.",
+    summary: truncateText(`Draft review-only notes, status updates, and next-step prompts from repeated-task evidence ${timelineEvidence}, focused on the hurdle: ${cognitiveHurdle.toLowerCase()}.`, 500),
     implementationSteps: [
-      "Turn each cited evidence summary into a short draft status note.",
+      "Turn each common action and recommendation seed into a short draft status note.",
       "Ask the user to choose the audience: self, manager, teammate, or project channel.",
       "Generate a concise draft with open questions, next actions, and confidence limits.",
       "Require human review before sending or saving the draft."
@@ -535,16 +687,78 @@ function buildLocalSkillProposals(pattern) {
   return [reportProposal, automationProposal, assistanceProposal];
 }
 
+function inferCognitiveHurdleForProposal(pattern) {
+  return pattern.signals.find((signal) => (
+    /hurdle|dwell|burden|switch|blocked|unresolved|manual|reconciliation|command|sensitive|connecting/i.test(signal)
+  )) ?? "the user has to reconstruct intent, status, and next actions from scattered visible work";
+}
+
+function formatEvidenceList(evidenceIds) {
+  if (evidenceIds.length <= 2) return evidenceIds.join(", ");
+  return `${evidenceIds.slice(0, 2).join(", ")}, +${evidenceIds.length - 2} more`;
+}
+
+function ensureUniqueProposalIds(proposals) {
+  const used = new Set();
+  return proposals.map((proposal) => {
+    if (!used.has(proposal.id)) {
+      used.add(proposal.id);
+      return proposal;
+    }
+
+    let suffix = 2;
+    let candidate = truncateSlug(`${proposal.id}-${suffix}`, 120);
+    while (used.has(candidate)) {
+      suffix += 1;
+      candidate = truncateSlug(`${proposal.id}-${suffix}`, 120);
+    }
+    used.add(candidate);
+    return {
+      ...proposal,
+      id: candidate
+    };
+  });
+}
+
+function truncateSlug(value, maxLength) {
+  const text = value.slice(0, maxLength).replace(/-+$/g, "");
+  return text || "proposal";
+}
+
 function summarizeIntent(observation) {
   return observation.visibleTextSummary;
 }
 
-function confidenceFor(frameCount) {
-  return Number(Math.min(0.86, 0.62 + frameCount * 0.04).toFixed(2));
-}
+function inferFrameKeyTasks(text) {
+  const normalized = String(text ?? "").toLowerCase();
+  const tasks = [];
+  const attendanceDominant = /\b(attendance|absence|parent|student|pupil|mis|sims)\b/.test(normalized);
+  const developmentDominant = /\b(github|pull request|\bpr\b|code|diff|repository|cursor|codex|terminal|console|npm|make|test)\b/.test(normalized) && !attendanceDominant;
 
-function estimateWeeklySavingMinutes(frameCount, signalCount) {
-  return Math.min(180, Math.max(30, frameCount * 18 + signalCount * 6));
+  if (attendanceDominant) {
+    tasks.push("Review attendance report evidence");
+  }
+  if (/\b(reconcile|reconciliation|check|qa|manual|review)\b/.test(normalized)) {
+    tasks.push("Reconcile visible evidence and quality checks");
+  }
+  if (/\b(email|message|draft|follow-up|communication|slack|teams|chat)\b/.test(normalized)) {
+    tasks.push("Draft or review follow-up communication");
+  }
+  if (developmentDominant) {
+    tasks.push("Review engineering work and code context");
+  }
+  if (developmentDominant && /\b(terminal|console|command|npm|make|test|build|error|failed|exception)\b/.test(normalized)) {
+    tasks.push("Inspect command output and troubleshoot blockers");
+  }
+  if (!developmentDominant && /\b(report|dashboard|chart|metric|spreadsheet|table|export)\b/.test(normalized)) {
+    tasks.push("Review report or dashboard state");
+  }
+  if (/\b(template|checklist|queue|todo|next action|status)\b/.test(normalized)) {
+    tasks.push("Organize next actions into reusable workflow structure");
+  }
+
+  const uniqueTasks = unique(tasks).slice(0, 6);
+  return uniqueTasks.length > 0 ? uniqueTasks : ["Review a visible work surface"];
 }
 
 function validateDay(day) {

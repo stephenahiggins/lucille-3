@@ -1,4 +1,5 @@
 import { assertPrivacySafe, privacyRedactions } from "../privacy/safety.mjs";
+import { resolveOpenAIModel } from "../config/models.mjs";
 import { assessSkillPortfolioReadiness, requiredProposalCategories } from "../skills/proposals.mjs";
 
 const responsesEndpoint = "https://api.openai.com/v1/responses";
@@ -8,7 +9,10 @@ const requiredTargets = ["Claude", "Codex", "Cursor", "ChatGPT"];
 export async function synthesizeWithOpenAI(options = {}) {
   const frames = requireArray(options.frames, "frames");
   const day = requireText(options.day, "day");
-  const model = requireText(options.model ?? "gpt-5.5", "model");
+  const model = requireText(resolveOpenAIModel({
+    value: options.model,
+    env: options.env
+  }), "model");
   const reasoningEffort = normalizeReasoningEffort(options.reasoningEffort ?? "high");
   const env = options.env ?? process.env;
   const apiKey = env.OPENAI_API_KEY;
@@ -25,6 +29,7 @@ export async function synthesizeWithOpenAI(options = {}) {
   const evidencePackage = buildEvidencePackage({
     day,
     frames,
+    activityTimeline: options.activityTimeline ?? null,
     localPatterns: options.localPatterns ?? []
   });
   assertPrivacySafe(evidencePackage, "openaiEvidencePackage");
@@ -99,7 +104,7 @@ export async function synthesizeWithOpenAI(options = {}) {
   );
 }
 
-export function buildEvidencePackage({ day, frames, localPatterns = [] }) {
+export function buildEvidencePackage({ day, frames, activityTimeline = null, localPatterns = [] }) {
   const redactedFrames = frames.map((frame) => ({
     evidenceId: frame.evidenceId,
     day: frame.day,
@@ -111,6 +116,7 @@ export function buildEvidencePackage({ day, frames, localPatterns = [] }) {
     },
     activities: frame.activities,
     visibleIntent: frame.visibleIntent,
+    keyTasks: frame.keyTasks,
     evidence: frame.evidence.map((item) => ({
       id: item.id,
       kind: item.kind,
@@ -123,17 +129,61 @@ export function buildEvidencePackage({ day, frames, localPatterns = [] }) {
     schemaVersion: "openai-synthesis-evidence.v1",
     day,
     privacy: {
-      evidencePolicy: "redacted_structured_frame_evidence_only",
+      evidencePolicy: activityTimeline
+        ? "redacted_structured_timeline_and_frame_evidence_only"
+        : "redacted_structured_frame_evidence_only",
       rawScreenshotsIncluded: false,
       rawMediaPathsIncluded: false,
       redactions: privacyRedactions()
     },
     frames: redactedFrames,
+    activityTimeline: activityTimeline
+      ? {
+        schemaVersion: activityTimeline.schemaVersion,
+        textCapturePolicy: activityTimeline.textCapturePolicy,
+        commonTasks: activityTimeline.commonTasks.map((task) => ({
+          id: task.id,
+          title: task.title,
+          segmentIds: task.segmentIds,
+          segmentCount: task.segmentCount,
+          evidenceIds: task.evidenceIds,
+          frameCount: task.frameCount,
+          firstAt: task.firstAt,
+          lastAt: task.lastAt,
+          totalDwellTimeSeconds: task.totalDwellTimeSeconds,
+          surfaceSwitchCount: task.surfaceSwitchCount,
+          userIntent: task.userIntent,
+          evidenceNarrative: task.evidenceNarrative,
+          evidenceTrail: task.evidenceTrail,
+          commonActions: task.commonActions,
+          cognitiveHurdles: task.cognitiveHurdles,
+          recommendationSeeds: task.recommendationSeeds,
+          confidence: task.confidence
+        })),
+        segments: activityTimeline.segments.map((segment) => ({
+          id: segment.id,
+          title: segment.title,
+          startAt: segment.startAt,
+          endAt: segment.endAt,
+          dwellTimeSeconds: segment.dwellTimeSeconds,
+          evidenceIds: segment.evidenceIds,
+          surfaceSwitchCount: segment.surfaceSwitchCount,
+          userIntent: segment.userIntent,
+          evidenceTrail: segment.evidenceTrail,
+          actionsTaken: segment.actionsTaken,
+          cognitiveHurdles: segment.cognitiveHurdles,
+          recommendationSeeds: segment.recommendationSeeds,
+          confidence: segment.confidence
+        }))
+      }
+      : null,
     localPatterns: localPatterns.map((pattern) => ({
       id: pattern.id,
       title: pattern.title,
       summary: pattern.summary,
       repeatedAcrossEvidence: pattern.repeatedAcrossEvidence,
+      evidenceCount: pattern.evidenceCount,
+      segmentCount: pattern.segmentCount,
       confidence: pattern.confidence,
       signals: pattern.signals
     }))
@@ -149,8 +199,9 @@ function buildResponsesRequest({ day, model, reasoningEffort, evidencePackage, f
     instructions: [
       "You synthesize Lucille 3 work-pattern evidence.",
       "Return JSON only.",
-      "Use only the supplied redacted structured frame evidence.",
+      "Use only the supplied redacted structured frame and activity timeline evidence.",
       "Do not ask for or infer from screenshots, hidden monitoring, clipboard, audio, keystrokes, raw document bodies, or raw message bodies.",
+      "Prioritize activity timeline commonTasks for repeated tasks across the whole evidence set, then use segments for supporting context.",
       "Analyze the evidence as Lucille, an AI-powered digital transformation consultant for weekly employee efficiency reports.",
       "Generate a minimum marketable product skill portfolio that matches this release promise: employees receive weekly tailored AI efficiency reports, and managers can monitor AI transformation across the organisation.",
       `The proposal set must include at least one proposal in every category: ${requiredProposalCategories.join(", ")}.`,
@@ -182,7 +233,7 @@ function buildResponsesRequest({ day, model, reasoningEffort, evidencePackage, f
                     confidence: 0.75,
                     signals: ["short visible signal"],
                     estimatedMinutesPerWeek: 45,
-                    recommendation: "Practical user-facing AI assistance recommendation.",
+                    recommendation: "Practical user-facing AI assistance recommendation that names the timeline-derived cognitive hurdle.",
                     enterpriseSignal: "Manager-facing adoption or transformation tracking note."
                   }
                 ],
@@ -245,6 +296,12 @@ function normalizePattern(pattern, { day, evidenceIds, index }) {
     title: requireText(pattern.title, `${id}.title`, 120),
     summary: requireText(pattern.summary, `${id}.summary`, 500),
     repeatedAcrossEvidence,
+    evidenceCount: Number.isInteger(pattern.evidenceCount) && pattern.evidenceCount > 0
+      ? pattern.evidenceCount
+      : repeatedAcrossEvidence.length,
+    segmentCount: Number.isInteger(pattern.segmentCount) && pattern.segmentCount > 0
+      ? pattern.segmentCount
+      : 1,
     confidence: normalizeConfidence(pattern.confidence, `${id}.confidence`),
     signals: optionalTextArray(pattern.signals, `${id}.signals`, 8),
     estimatedMinutesPerWeek: optionalPositiveInteger(pattern.estimatedMinutesPerWeek, `${id}.estimatedMinutesPerWeek`, 45),

@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { validateActivityTimeline } from "../analysis/activityTimeline.mjs";
+import { buildTaskSkillSummaryFromArtifacts } from "../analysis/taskSkillSummary.mjs";
 import { assertPrivacySafe } from "../privacy/safety.mjs";
 import { validateSkillProposalSet } from "../skills/proposals.mjs";
 
@@ -14,6 +16,7 @@ const frameFields = new Set([
   "surface",
   "activities",
   "visibleIntent",
+  "keyTasks",
   "evidence",
   "redactions",
   "riskFlags"
@@ -47,6 +50,8 @@ const patternFields = new Set([
   "title",
   "summary",
   "repeatedAcrossEvidence",
+  "evidenceCount",
+  "segmentCount",
   "confidence",
   "signals",
   "estimatedMinutesPerWeek",
@@ -61,15 +66,19 @@ export function generateDailyReport(options = {}) {
   const analysisDir = path.join(root, "storage", "analysis", day);
 
   const frames = readFrameAnalysis(path.join(analysisDir, "frame-analysis.jsonl"), day);
+  const activityTimeline = readActivityTimeline(path.join(analysisDir, "activity-timeline.json"), day);
   const workPatterns = readWorkPatterns(path.join(analysisDir, "work-patterns.json"), day);
   const proposalSet = readSkillProposals(path.join(analysisDir, "skill-proposals.json"), day);
-  const reportMarkdown = renderReport({ day, frames, workPatterns, proposalSet });
+  const taskSkillSummary = buildTaskSkillSummaryFromArtifacts({ day, activityTimeline, proposalSet });
+  const reportMarkdown = renderReport({ day, frames, activityTimeline, workPatterns, proposalSet, taskSkillSummary });
 
   assertPrivacySafe({
     day,
     frameCount: frames.length,
+    activityTimeline,
     workPatterns,
     proposalSet,
+    taskSkillSummary,
     reportMarkdown
   }, "dailyReport");
 
@@ -82,8 +91,10 @@ export function generateDailyReport(options = {}) {
     day,
     reportPath: path.relative(root, reportPath),
     frameCount: frames.length,
+    timelineSegmentCount: activityTimeline.segments.length,
     patternCount: workPatterns.patterns.length,
     proposalCount: proposalSet.proposals.length,
+    commonTaskCount: taskSkillSummary.commonTasks.length,
     message: `Wrote weekly efficiency report for ${day}.`
   };
 }
@@ -120,6 +131,17 @@ function readWorkPatterns(filePath, day) {
   });
 }
 
+function readActivityTimeline(filePath, day) {
+  if (!existsSync(filePath)) {
+    throw new Error(`No activity timeline found for ${day}. Run make analyse DAY=${day} first.`);
+  }
+
+  return validateActivityTimeline(JSON.parse(readFileSync(filePath, "utf8")), {
+    day,
+    source: "activity-timeline.json"
+  });
+}
+
 function readSkillProposals(filePath, day) {
   if (!existsSync(filePath)) {
     throw new Error(`No skill proposals found for ${day}. Run make analyse DAY=${day} first.`);
@@ -146,6 +168,7 @@ function validateFrame(value, { day, source }) {
     surface: validateSurface(value.surface, `${source}.surface`),
     activities: requireTextArray(value.activities, `${source}.activities`, 12, 80),
     visibleIntent: requireText(value.visibleIntent, `${source}.visibleIntent`, 500),
+    keyTasks: requireTextArray(value.keyTasks, `${source}.keyTasks`, 6, 120),
     evidence: requireArray(value.evidence, `${source}.evidence`).map((item, index) => (
       validateEvidence(item, `${source}.evidence[${index}]`)
     )),
@@ -235,6 +258,8 @@ function validatePattern(value, source) {
     summary: requireText(value.summary, `${source}.summary`, 500),
     repeatedAcrossEvidence: requireArray(value.repeatedAcrossEvidence, `${source}.repeatedAcrossEvidence`)
       .map((id, index) => requireEvidenceId(id, `${source}.repeatedAcrossEvidence[${index}]`)),
+    evidenceCount: requireNonNegativeInteger(value.evidenceCount, `${source}.evidenceCount`),
+    segmentCount: requireNonNegativeInteger(value.segmentCount, `${source}.segmentCount`),
     confidence: requireConfidence(value.confidence, `${source}.confidence`),
     signals: requireTextArray(value.signals, `${source}.signals`, 12, 160),
     estimatedMinutesPerWeek: requireNonNegativeInteger(value.estimatedMinutesPerWeek, `${source}.estimatedMinutesPerWeek`),
@@ -244,7 +269,7 @@ function validatePattern(value, source) {
   };
 }
 
-function renderReport({ day, frames, workPatterns, proposalSet }) {
+function renderReport({ day, frames, activityTimeline, workPatterns, proposalSet, taskSkillSummary }) {
   const lifecycle = workPatterns.synthesis.rawMediaLifecycle;
   const totalWeeklyMinutes = workPatterns.patterns.reduce((sum, pattern) => sum + pattern.estimatedMinutesPerWeek, 0);
   const captureSurfaces = frames.map((frame) => {
@@ -260,9 +285,56 @@ ${pattern.summary}
 - Estimated weekly time saving: ${pattern.estimatedMinutesPerWeek} minutes
 - Suggested action: ${pattern.recommendation}
 - Organisation signal: ${pattern.enterpriseSignal}
-- Evidence: ${pattern.repeatedAcrossEvidence.join(", ")}
+- Evidence count: ${pattern.evidenceCount} frame(s) across ${pattern.segmentCount} segment(s)
+- Representative evidence: ${pattern.repeatedAcrossEvidence.join(", ")}
 - Signals: ${pattern.signals.join("; ")}
 - Privacy boundary: ${pattern.privacyBoundary}`
+  )).join("\n\n");
+  const commonTasks = activityTimeline.commonTasks.map((task) => (
+    `### ${task.title}
+
+- Repeated across: ${task.segmentCount} timeline segment(s), ${task.frameCount} frame(s)
+- First seen: ${task.firstAt}
+- Last seen: ${task.lastAt}
+- Total dwell time: ${task.totalDwellTimeSeconds} seconds
+- User intent: ${task.userIntent}
+- Evidence narrative: ${task.evidenceNarrative}
+- Common actions: ${task.commonActions.join("; ")}
+- Cognitive hurdles: ${task.cognitiveHurdles.join("; ") || "No major friction signal visible"}
+- Recommendation seeds: ${task.recommendationSeeds.join("; ")}
+- Representative evidence: ${task.evidenceIds.join(", ")}
+
+Frame-backed task trail:
+${task.evidenceTrail.map((entry) => (
+  `- ${entry.evidenceId} (${entry.capturedAt}, ${entry.surface}): ${entry.keyTasks.join("; ")} | signals: ${entry.signals.join("; ")}`
+)).join("\n")}`
+  )).join("\n\n");
+  const timeline = activityTimeline.segments.map((segment) => (
+    `### ${segment.title}
+
+- Time: ${segment.startAt} to ${segment.endAt}
+- Dwell time: ${segment.dwellTimeSeconds} seconds
+- User intent: ${segment.userIntent}
+- Actions taken: ${segment.actionsTaken.join("; ")}
+- Cognitive hurdles: ${segment.cognitiveHurdles.join("; ") || "No major friction signal visible"}
+- Recommendation seeds: ${segment.recommendationSeeds.join("; ")}
+- Evidence: ${segment.evidenceIds.join(", ")}
+- Frame tasks: ${segment.evidenceTrail.map((entry) => `${entry.evidenceId}: ${entry.keyTasks.join("; ")}`).join(" | ")}`
+  )).join("\n\n");
+  const taskSkillMatches = taskSkillSummary.commonTasks.map((task) => (
+    `### ${task.title}
+
+- Evidence coverage: ${task.evidenceCount} frame(s) across ${task.segmentCount} timeline segment(s)
+- Representative evidence IDs: ${task.evidenceIds.join(", ")}
+- Dwell time: ${task.dwellTimeSeconds} seconds
+- Confidence: ${task.confidence}
+- Key tasks: ${task.topTasks.join("; ")}
+- Evidence narrative: ${task.evidenceNarrative}
+
+Matching skills:
+${task.skills.map((skill) => (
+  `- ${skill.title} (${skill.category}, confidence ${skill.confidence}, evidence overlap ${skill.overlap}, saves ${skill.estimatedMinutesPerWeek} min/week)`
+)).join("\n")}`
   )).join("\n\n");
   const proposals = proposalSet.proposals.map((proposal) => (
     `### ${proposal.title}
@@ -312,7 +384,31 @@ ${captureSurfaces}
 - Files retained: ${lifecycle.mediaFilesRetained}
 - Debug retention explicitly enabled: ${lifecycle.debugRetentionExplicitlyEnabled}
 
+## Activity Timeline
+
+- Text capture policy: ${activityTimeline.textCapturePolicy}
+- Frames represented: ${activityTimeline.scaleSummary.frameCount}
+- Common tasks: ${activityTimeline.scaleSummary.commonTaskCount}
+- Timeline segments: ${activityTimeline.scaleSummary.segmentCount}
+- Representative timeline snapshots stored: ${activityTimeline.scaleSummary.snapshotCount}
+- Representative snapshot cap: ${activityTimeline.scaleSummary.representativeSnapshotCap} snapshot(s)
+- Representative evidence cap: ${activityTimeline.scaleSummary.representativeEvidenceIdCap} evidence ID(s) per cluster
+- Evidence trail cap: ${activityTimeline.scaleSummary.evidenceTrailCap} frame-backed entry(s) per cluster
+- Aggregation strategy: ${activityTimeline.scaleSummary.aggregationStrategy}
+
+## Common Tasks
+
+${commonTasks}
+
+## Timeline Segments
+
+${timeline}
+
 ${patterns}
+
+## Skills By Repeated Task
+
+${taskSkillMatches}
 
 ## Skill Proposals
 

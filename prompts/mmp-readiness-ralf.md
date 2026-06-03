@@ -20,7 +20,7 @@ The remaining blockers are:
    - Enforce excluded apps and domains before persisted observations reach analysis.
 
 2. Real local visual model provider plumbing
-   - Keep `qwen2.5vl:7b` as the default local model.
+   - Keep the default local model in `LUCILLE_LOCAL_MODEL` in `.env`.
    - Add a real provider path that can call a local model service when available, preferably Ollama if present.
    - Keep deterministic mock mode for tests, demos, and unavailable local models.
    - Fail clearly when the user explicitly requests a real provider that is unavailable.
@@ -29,8 +29,8 @@ The remaining blockers are:
 3. MMP user-facing workflow
    - `make capture`
    - `make capture-once`
-   - `make analyse DAY=YYYY-MM-DD MODEL=qwen2.5vl:7b`
-   - `make analyse OPENAI=1 OPENAI_MODEL=gpt-5.5`
+   - `make analyse DAY=YYYY-MM-DD`
+   - `make analyse OPENAI=1`
    - `make report DAY=YYYY-MM-DD`
    - `make export-skill DAY=YYYY-MM-DD APPROVE_EXPORT=1`
    - The happy path should be explainable in the README and deterministic without paid services.

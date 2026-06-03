@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "operator-smoke.v1",
+  "day": "2026-06-01",
+  "completedAt": "2026-06-02T13:15:28.050Z",
+  "captureMode": "existing_day_evidence",
+  "realCaptureIngestion": true,
+  "localVisualProvider": true,
+  "privacyReview": true,
+  "provider": "ollama",
+  "model": "qwen2.5vl:7b",
+  "captureCountRequested": 3,
+  "captureIntervalSeconds": 3,
+  "mmpReady": true,
+  "mmpReadiness": {
+    "frameCount": 8,
+    "commonTaskCount": 2,
+    "taskSkillSummaryCount": 2,
+    "repeatedTaskFrameCount": 8,
+    "patternCount": 2,
+    "proposalCount": 8,
+    "proposalCategories": [
+      "ai_assistance",
+      "employee_weekly_report",
+      "enterprise_rollout",
+      "manager_monitoring",
+      "workflow_automation"
+    ]
+  },
+  "evidence": {
+    "observations": 486,
+    "rawMediaFilesCaptured": 486,
+    "frameAnalysis": 8,
+    "report": "output/reports/2026-06-01.md",
+    "approvedExport": "output/skills/2026-06-01/skill-ai-transformation-opportunity-dashboard"
+  }
+}

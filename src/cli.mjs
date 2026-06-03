@@ -2,9 +2,11 @@
 import path from "node:path";
 import { evaluateOpenAIModels } from "./analysis/modelEvaluation.mjs";
 import { readAnalysisSummary, runAnalysis } from "./analysis/runAnalysis.mjs";
+import { buildTaskSkillSummary } from "./analysis/taskSkillSummary.mjs";
 import { handleCaptureAction } from "./capture/controller.mjs";
 import { requestScreenCapturePermission } from "./capture/permissions.mjs";
 import { loadDotEnv } from "./config/env.mjs";
+import { resolveLocalModel, resolveOpenAIModel } from "./config/models.mjs";
 import { generateDailyReport } from "./reports/dailyReport.mjs";
 import { exportSkillProposal } from "./skills/exporters.mjs";
 import { startSkillUiServer } from "./ui/server.mjs";
@@ -28,21 +30,25 @@ async function main(argv) {
 
   if (command === "analyse") {
     const flags = parseFlags([subcommand, ...rest].filter(Boolean));
+    const model = resolveLocalModel({ value: flags.model });
+    const openaiModel = flags.openai
+      ? resolveOpenAIModel({ value: flags.openaiModel })
+      : flags.openaiModel ?? undefined;
     const result = await runAnalysis({
       day: flags.day ?? today(),
-      model: flags.model ?? "moondream:1.8b",
+      model,
       provider: flags.provider ?? process.env.LUCILLE_ANALYSIS_PROVIDER ?? "auto",
       limit: flags.limit,
       offset: flags.offset,
       openai: Boolean(flags.openai),
-      openaiModel: flags.openaiModel ?? "gpt-5.5",
+      openaiModel,
       reasoningEffort: flags.reasoningEffort ?? "high",
       deleteRawMedia: Boolean(flags.deleteRawMedia)
     });
 
     console.log(`Analysed ${result.frameCount} frame observation(s) for ${result.day}.`);
-    console.log(`Local provider: ${result.provider}. Model: ${flags.model ?? "moondream:1.8b"}.`);
-    console.log(`Patterns: ${result.patternCount}. Skill proposals: ${result.proposalCount}.`);
+    console.log(`Local provider: ${result.provider}. Model: ${model}.`);
+    console.log(`Timeline segments: ${result.timelineSegmentCount}. Patterns: ${result.patternCount}. Skill proposals: ${result.proposalCount}.`);
     console.log(`Wrote ${path.relative(process.cwd(), result.analysisDir)}`);
     return;
   }
@@ -76,6 +82,33 @@ async function main(argv) {
     console.log(`Skill proposals for ${day}`);
     for (const proposal of summary.proposals) {
       console.log(`- ${proposal.title} (${proposal.confidence}): ${proposal.evidenceIds.join(", ")}`);
+    }
+    return;
+  }
+
+  if (command === "tasks") {
+    const flags = parseFlags([subcommand, ...rest].filter(Boolean));
+    const day = flags.day ?? today();
+    const summary = buildTaskSkillSummary({ day });
+    console.log(`Common tasks for ${day}`);
+    if (summary.commonTasks.length === 0) {
+      console.log("No common tasks found.");
+      return;
+    }
+    for (const task of summary.commonTasks) {
+      console.log(`- ${task.title} (confidence ${task.confidence}, ${task.evidenceCount} frame(s), ${task.segmentCount} segment(s), ${task.dwellTimeSeconds}s dwell)`);
+      console.log(`  Evidence: ${task.evidenceNarrative}`);
+      console.log(`  Representative evidence IDs: ${task.evidenceIds.join(", ")}`);
+      console.log(`  Key tasks: ${task.topTasks.join("; ")}`);
+      const skills = task.skills.slice(0, 5);
+      if (skills.length === 0) {
+        console.log("  Skills: none matched");
+      } else {
+        console.log("  Skills:");
+        for (const skill of skills) {
+          console.log(`  - ${skill.title} [${skill.category}] confidence ${skill.confidence}, overlap ${skill.overlap}, saves ${skill.estimatedMinutesPerWeek} min/week`);
+        }
+      }
     }
     return;
   }
@@ -185,17 +218,18 @@ function printHelp() {
   console.log(`Lucille 3
 
 Usage:
-  lucille analyse [--day YYYY-MM-DD] [--model moondream:1.8b] [--provider auto|mock|ollama] [--limit N] [--offset N] [--delete-raw-media]
-  lucille analyse --openai --openai-model gpt-5.5
-  lucille eval-models [--day YYYY-MM-DD] [--models gpt-5.5] [--reasoning-effort high]
+  lucille analyse [--day YYYY-MM-DD] [--model MODEL] [--provider auto|mock|ollama] [--limit N] [--offset N] [--delete-raw-media]
+  lucille analyse --openai [--openai-model MODEL]
+  lucille eval-models [--day YYYY-MM-DD] [--models MODEL[,MODEL...]] [--reasoning-effort high]
   lucille capture permission [--no-open-settings] [--no-request-access]
   lucille capture start|pause|resume|stop|once|status [--day YYYY-MM-DD] [--ack-real-capture]
   lucille report --day YYYY-MM-DD
+  lucille tasks --day YYYY-MM-DD
   lucille review --day YYYY-MM-DD
   lucille export --day YYYY-MM-DD [--proposal-id skill-id] [--approve-export]
   lucille ui [--day YYYY-MM-DD] [--port 4173]
 
-Defaults are local-first. The analyse command uses provider=auto: local Ollama for real captured observations with day-scoped raw media, and deterministic mock analysis only for fixture-backed runs without captured observations. Real captures fail clearly instead of silently falling back to mock if raw media or Ollama is unavailable. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
+Defaults are local-first and model names come from .env unless explicit flags are passed. The analyse command uses provider=auto: local Ollama for real captured observations with day-scoped raw media, and deterministic mock analysis only for fixture-backed runs without captured observations. Real captures fail clearly instead of silently falling back to mock if raw media or Ollama is unavailable. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
 }
 
 function today() {

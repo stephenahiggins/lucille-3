@@ -2,11 +2,14 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { validateObservations } from "../src/analysis/observations.mjs";
+import { loadDotEnv } from "../src/config/env.mjs";
+import { modelEnv } from "../src/config/models.mjs";
 import { assertPrivacySafe } from "../src/privacy/safety.mjs";
 
 const root = process.env.LUCILLE_ROOT
   ? path.resolve(process.env.LUCILLE_ROOT)
   : process.cwd();
+loadDotEnv({ root });
 
 const checks = [
   ["README", "README.md"],
@@ -42,7 +45,10 @@ const mmpChecks = [
     sourceIncludes("src/analysis/runAnalysis.mjs", "enforceObservationExclusions")
   )],
   ["Failed capture raw media cleanup", () => sourceIncludes("src/capture/controller.mjs", "cleanupPartialRawMedia")],
-  ["Default local model", () => sourceIncludes("Makefile", "moondream:1.8b")],
+  ["Default local model from env", () => (
+    sourceIncludes("Makefile", modelEnv.local) &&
+    sourceIncludes("src/config/models.mjs", modelEnv.local)
+  )],
   ["Ollama local provider", () => sourceIncludes("src/analysis/ollamaProvider.mjs", "/api/generate")],
   ["Provider selection", () => sourceIncludes("src/analysis/runAnalysis.mjs", "validateProvider")],
   ["OpenAI redacted synthesis", () => sourceIncludes("src/analysis/openaiSynthesis.mjs", "redacted_structured")],
@@ -59,8 +65,10 @@ const workflowChecks = [
   ["Capture observations JSONL", () => hasValidCaptureObservationDayFile()],
   ["Day-scoped raw media directory", () => hasRawMediaDirectory()],
   ["Frame analysis JSONL", () => hasValidJsonlDayFile("storage/analysis", "frame-analysis.jsonl")],
+  ["Activity timeline JSON", () => hasValidJsonDayFile("storage/analysis", "activity-timeline.json", "activity-timeline.v1")],
   ["Work patterns JSON", () => hasValidJsonDayFile("storage/analysis", "work-patterns.json", "work-patterns.v1")],
   ["Skill proposals JSON", () => hasValidJsonDayFile("storage/analysis", "skill-proposals.json", "skill-proposals.v1")],
+  ["Task-skill summary JSON", () => hasValidJsonDayFile("storage/analysis", "task-skill-summary.json", "task-skill-summary.v1")],
   ["Daily report Markdown", () => hasReportMarkdown()],
   ["Approved export bundle", () => hasApprovedExportBundle()],
   ["Operator environment smoke", () => hasOperatorSmokeEvidence()]
@@ -307,8 +315,10 @@ function hasOperatorSmokeEvidence() {
     smoke.realCaptureIngestion === true &&
     smoke.localVisualProvider === true &&
     smoke.privacyReview === true &&
+    ["fresh_capture_sequence", "existing_day_evidence"].includes(smoke.captureMode) &&
+    smoke.mmpReady === true &&
     smoke.provider === "ollama" &&
-    smoke.model === "moondream:1.8b" &&
+    smoke.model === expectedLocalModel(smoke.model) &&
     /^\d{4}-\d{2}-\d{2}$/.test(smoke.day ?? "") &&
     hasOperatorSmokeEvidenceSummary(smoke))) {
     return false;
@@ -317,8 +327,10 @@ function hasOperatorSmokeEvidence() {
   return hasValidCaptureObservationDayFile(smoke.day) &&
     hasRawMediaDirectory(smoke.day) &&
     hasValidJsonlDayFile("storage/analysis", "frame-analysis.jsonl", smoke.day) &&
+    hasValidJsonDayFile("storage/analysis", "activity-timeline.json", "activity-timeline.v1", smoke.day) &&
     hasValidJsonDayFile("storage/analysis", "work-patterns.json", "work-patterns.v1", smoke.day) &&
     hasValidJsonDayFile("storage/analysis", "skill-proposals.json", "skill-proposals.v1", smoke.day) &&
+    hasValidJsonDayFile("storage/analysis", "task-skill-summary.json", "task-skill-summary.v1", smoke.day) &&
     hasReportMarkdown(smoke.day) &&
     hasApprovedExportBundle(smoke.day) &&
     hasStrictOperatorWorkflowEvidence(smoke.day, smoke.model);
@@ -327,17 +339,34 @@ function hasOperatorSmokeEvidence() {
 function hasOperatorSmokeEvidenceSummary(smoke) {
   const evidence = smoke.evidence;
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return false;
+  const readiness = smoke.mmpReadiness;
+  if (!readiness || typeof readiness !== "object" || Array.isArray(readiness)) return false;
+  if (!Number.isInteger(smoke.captureCountRequested) || smoke.captureCountRequested < 3) return false;
+  if (!Number.isInteger(smoke.captureIntervalSeconds) || smoke.captureIntervalSeconds < 0) return false;
 
   return Number.isInteger(evidence.observations) &&
-    evidence.observations > 0 &&
+    evidence.observations >= smoke.captureCountRequested &&
     Number.isInteger(evidence.rawMediaFilesCaptured) &&
     evidence.rawMediaFilesCaptured === evidence.observations &&
     Number.isInteger(evidence.frameAnalysis) &&
-    evidence.frameAnalysis === evidence.observations &&
+    evidence.frameAnalysis >= smoke.captureCountRequested &&
+    evidence.frameAnalysis <= evidence.observations &&
     typeof evidence.report === "string" &&
     evidence.report === `output/reports/${smoke.day}.md` &&
     typeof evidence.approvedExport === "string" &&
-    evidence.approvedExport.startsWith(`output/skills/${smoke.day}/`);
+    evidence.approvedExport.startsWith(`output/skills/${smoke.day}/`) &&
+    Number.isInteger(readiness.frameCount) &&
+    readiness.frameCount >= smoke.captureCountRequested &&
+    Number.isInteger(readiness.commonTaskCount) &&
+    readiness.commonTaskCount > 0 &&
+    Number.isInteger(readiness.taskSkillSummaryCount) &&
+    readiness.taskSkillSummaryCount === readiness.commonTaskCount &&
+    Number.isInteger(readiness.repeatedTaskFrameCount) &&
+    readiness.repeatedTaskFrameCount >= readiness.frameCount &&
+    Number.isInteger(readiness.proposalCount) &&
+    readiness.proposalCount > 0 &&
+    Array.isArray(readiness.proposalCategories) &&
+    readiness.proposalCategories.length >= 3;
 }
 
 function hasStrictOperatorWorkflowEvidence(day, model) {
@@ -346,20 +375,25 @@ function hasStrictOperatorWorkflowEvidence(day, model) {
     day
   );
   const frames = readJsonl(path.join(root, "storage", "analysis", day, "frame-analysis.jsonl"));
+  const timeline = readJson(path.join(root, "storage", "analysis", day, "activity-timeline.json"));
   const patterns = readJson(path.join(root, "storage", "analysis", day, "work-patterns.json"));
   const proposals = readJson(path.join(root, "storage", "analysis", day, "skill-proposals.json"));
+  const taskSkillSummary = readJson(path.join(root, "storage", "analysis", day, "task-skill-summary.json"));
   const report = readFileSafely(path.join(root, "output", "reports", `${day}.md`));
 
-  if (!isPrivacySafe({ observations, frames, patterns, proposals, report }, "operatorWorkflowEvidence")) {
+  if (!isPrivacySafe({ observations, frames, timeline, patterns, proposals, taskSkillSummary, report }, "operatorWorkflowEvidence")) {
     return false;
   }
 
-  if (observations.length === 0 || frames.length === 0) return false;
+  if (observations.length < 3 || frames.length < 3) return false;
   if (!frames.every((frame) => frame.provider === "ollama" && frame.model === model && frame.day === day)) {
     return false;
   }
 
   if (patterns?.provider !== "ollama" || patterns?.model !== model || patterns?.day !== day) {
+    return false;
+  }
+  if (timeline?.day !== day || !Array.isArray(timeline?.commonTasks) || timeline.commonTasks.length === 0) {
     return false;
   }
   if (patterns?.synthesis?.rawScreenshotsSent !== false) return false;
@@ -368,11 +402,18 @@ function hasStrictOperatorWorkflowEvidence(day, model) {
   if (proposals?.day !== day || !Array.isArray(proposals?.proposals) || proposals.proposals.length === 0) {
     return false;
   }
+  if (taskSkillSummary?.day !== day || !Array.isArray(taskSkillSummary?.commonTasks) || taskSkillSummary.commonTasks.length === 0) {
+    return false;
+  }
 
   if (!report.startsWith(`# Lucille Weekly Efficiency Report: ${day}`)) return false;
   if (countRawMediaFiles(path.join(root, "storage", "captures", day, "raw-media")) === 0) return false;
 
   return true;
+}
+
+function expectedLocalModel(fallback) {
+  return process.env[modelEnv.local] ?? process.env.MODEL ?? fallback;
 }
 
 function countRawMediaFiles(rawMediaDir) {

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { buildActivityTimeline } from "../src/analysis/activityTimeline.mjs";
 import { evaluateOpenAIModels } from "../src/analysis/modelEvaluation.mjs";
 import { runAnalysis } from "../src/analysis/runAnalysis.mjs";
 import { handleCaptureAction, readCaptureState } from "../src/capture/controller.mjs";
@@ -24,8 +25,10 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
   });
 
   assert.equal(result.frameCount, 3);
+  assert.equal(result.timelineSegmentCount, 1);
   assert.equal(result.patternCount, 1);
-  assert.equal(result.proposalCount, 3);
+  assert.equal(result.proposalCount, 5);
+  assert.equal(result.commonTaskCount, 1);
   assert.equal(result.rawMediaLifecycle.action, "retained_by_default");
 
   const analysisDir = path.join(root, "storage", "analysis", "2026-05-30");
@@ -35,17 +38,355 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
     .map((line) => JSON.parse(line));
   const patterns = JSON.parse(readFileSync(path.join(analysisDir, "work-patterns.json"), "utf8"));
   const proposals = JSON.parse(readFileSync(path.join(analysisDir, "skill-proposals.json"), "utf8"));
+  const timeline = JSON.parse(readFileSync(path.join(analysisDir, "activity-timeline.json"), "utf8"));
+  const taskSkillSummary = JSON.parse(readFileSync(path.join(analysisDir, "task-skill-summary.json"), "utf8"));
 
   assert.equal(frames[0].schemaVersion, "frame-analysis.v1");
   assert.equal(frames[0].model, "moondream:1.8b");
+  assert.ok(Array.isArray(frames[0].keyTasks));
+  assert.ok(frames[0].keyTasks.length > 0);
+  assert.match(frames[0].keyTasks.join(" "), /attendance|report|review|reconcile/i);
+  assert.equal(timeline.schemaVersion, "activity-timeline.v1");
+  assert.equal(timeline.textCapturePolicy, "visible_text_ocr_only");
+  assert.equal(timeline.scaleSummary.frameCount, 3);
+  assert.equal(timeline.scaleSummary.snapshotCount, 3);
+  assert.equal(timeline.scaleSummary.segmentCount, 1);
+  assert.equal(timeline.scaleSummary.commonTaskCount, 1);
+  assert.equal(timeline.scaleSummary.representativeSnapshotCap, 50);
+  assert.equal(timeline.scaleSummary.representativeEvidenceIdCap, 50);
+  assert.equal(timeline.scaleSummary.evidenceTrailCap, 20);
+  assert.match(timeline.scaleSummary.aggregationStrategy, /common_tasks_group_repeated_timeline_segments/);
+  assert.equal(timeline.snapshots.length, 3);
+  assert.equal(timeline.segments.length, 1);
+  assert.equal(timeline.commonTasks.length, 1);
+  assert.equal(timeline.commonTasks[0].frameCount, 3);
+  assert.equal(timeline.commonTasks[0].segmentCount, 1);
+  assert.equal(timeline.commonTasks[0].evidenceIds.length, 3);
+  assert.equal(timeline.commonTasks[0].evidenceTrail.length, 3);
+  assert.deepEqual(timeline.snapshots[0].keyTasks, frames[0].keyTasks);
+  assert.match(timeline.commonTasks[0].evidenceNarrative, /3 frame\(s\).*1 separated timeline segment/i);
+  assert.ok(timeline.commonTasks[0].evidenceTrail.every((entry) => entry.keyTasks.length > 0));
+  assert.equal(timeline.segments[0].dwellTimeSeconds, 360);
+  assert.equal(timeline.segments[0].evidenceTrail.length, 3);
+  assert.match(timeline.segments[0].cognitiveHurdles.join(" "), /Attendance follow-up|dwell|switch/i);
+  assert.equal(taskSkillSummary.schemaVersion, "task-skill-summary.v1");
+  assert.equal(taskSkillSummary.commonTasks.length, 1);
+  assert.equal(taskSkillSummary.commonTasks[0].evidenceCount, 3);
+  assert.equal(taskSkillSummary.commonTasks[0].evidenceIds.length, 3);
+  assert.match(taskSkillSummary.commonTasks[0].topTasks.join(" "), /attendance/i);
+  assert.ok(taskSkillSummary.commonTasks[0].skills.some((skill) => skill.category === "employee_weekly_report"));
+  assert.ok(taskSkillSummary.commonTasks[0].skills.some((skill) => skill.category === "workflow_automation"));
+  assert.ok(taskSkillSummary.commonTasks[0].skills.some((skill) => skill.category === "ai_assistance"));
   assert.equal(patterns.patterns[0].repeatedAcrossEvidence.length, 3);
+  assert.match(patterns.patterns[0].summary, /clustered/i);
+  assert.match(patterns.patterns[0].signals.join(" "), /hurdle|dwell|switch|reconciliation/i);
   assert.equal(patterns.synthesis.rawMediaLifecycle.mediaFilesObserved, 0);
   assert.equal(proposals.proposals[0].status, "proposed");
   assert.deepEqual(proposals.proposals[0].targetTools, ["Claude", "Codex", "Cursor", "ChatGPT"]);
+  assert.equal(new Set(proposals.proposals.map((proposal) => proposal.id)).size, proposals.proposals.length);
+  assert.ok(proposals.proposals.some((proposal) => proposal.category === "employee_weekly_report"));
+  assert.ok(proposals.proposals.some((proposal) => proposal.category === "workflow_automation"));
+  assert.ok(proposals.proposals.some((proposal) => proposal.category === "ai_assistance"));
+  assert.ok(proposals.proposals.some((proposal) => proposal.category === "manager_monitoring"));
+  assert.ok(proposals.proposals.some((proposal) => proposal.category === "enterprise_rollout"));
+  assert.ok(proposals.proposals.some((proposal) => /attendance/i.test(proposal.title)));
+  assert.match(proposals.proposals[0].summary, /hurdle|timeline|evidence/i);
 
   assert.doesNotThrow(() => assertPrivacySafe(frames, "frames"));
+  assert.doesNotThrow(() => assertPrivacySafe(timeline, "timeline"));
+  assert.doesNotThrow(() => assertPrivacySafe(taskSkillSummary, "taskSkillSummary"));
   assert.doesNotThrow(() => assertPrivacySafe(patterns, "patterns"));
   assert.doesNotThrow(() => assertPrivacySafe(proposals, "proposals"));
+});
+
+test("MMP readiness verifier proves common-task aggregation and skill coverage", async () => {
+  const root = fixtureRoot();
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b"
+  });
+  generateDailyReport({ root, day: "2026-05-30" });
+
+  const output = execFileSync("node", ["scripts/verify-mmp-readiness.mjs", "--day", "2026-05-30"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      LUCILLE_ROOT: root
+    },
+    encoding: "utf8"
+  });
+
+  assert.match(output, /MMP readiness: ready/);
+  assert.match(output, /Frames: 3/);
+  assert.match(output, /Common tasks: 1/);
+  assert.match(output, /Task-skill summaries: 1/);
+  assert.match(output, /Repeated-task frame evidence: 3/);
+  assert.match(output, /employee_weekly_report/);
+  assert.match(output, /workflow_automation/);
+  assert.match(output, /ai_assistance/);
+  assert.match(output, /manager_monitoring/);
+  assert.match(output, /enterprise_rollout/);
+});
+
+test("MMP readiness verifier rejects stale task-skill summaries", async () => {
+  const root = fixtureRoot();
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b"
+  });
+  generateDailyReport({ root, day: "2026-05-30" });
+  const summaryPath = path.join(root, "storage", "analysis", "2026-05-30", "task-skill-summary.json");
+  const summary = JSON.parse(readFileSync(summaryPath, "utf8"));
+  summary.commonTasks[0].title = "Stale task title";
+  writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
+
+  assert.throws(
+    () => execFileSync("node", ["scripts/verify-mmp-readiness.mjs", "--day", "2026-05-30"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LUCILLE_ROOT: root
+      },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }),
+    /task-skill-summary\.json is stale/
+  );
+});
+
+test("CLI tasks command lists common tasks before matching skills", async () => {
+  const root = fixtureRoot();
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b"
+  });
+
+  const output = execFileSync("node", [path.join(process.cwd(), "src", "cli.mjs"), "tasks", "--day", "2026-05-30"], {
+    cwd: root,
+    env: process.env,
+    encoding: "utf8"
+  });
+
+  assert.match(output, /Common tasks for 2026-05-30/);
+  assert.match(output, /Attendance report review workflow/);
+  assert.match(output, /3 frame\(s\), 1 segment\(s\)/);
+  assert.match(output, /Representative evidence IDs: fixture-evidence-001, fixture-evidence-002, fixture-evidence-003/);
+  assert.match(output, /Key tasks: .*attendance/i);
+  assert.match(output, /Skills:/);
+  assert.match(output, /\[employee_weekly_report\]/);
+  assert.match(output, /\[workflow_automation\]/);
+  assert.match(output, /\[ai_assistance\]/);
+});
+
+test("activity timeline groups repeated screenshots into a dwell-bearing segment", () => {
+  const frames = [
+    syntheticFrame({
+      id: "dev-frame-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Cursor",
+      windowTitle: "Lucille pull request review",
+      visibleIntent: "Reviewing a GitHub pull request and visible code changes.",
+      evidence: ["GitHub pull request diff", "reviewing code changes"]
+    }),
+    syntheticFrame({
+      id: "dev-frame-002",
+      capturedAt: "2026-05-30T09:02:00.000Z",
+      appName: "Terminal",
+      windowTitle: "Lucille tests",
+      visibleIntent: "Inspecting test command output for the same GitHub pull request.",
+      evidence: ["terminal test output", "visible failing test summary"]
+    }),
+    syntheticFrame({
+      id: "dev-frame-003",
+      capturedAt: "2026-05-30T09:04:00.000Z",
+      appName: "Chrome",
+      windowTitle: "GitHub pull request conversation",
+      visibleIntent: "Returning to the pull request conversation after checking test output.",
+      evidence: ["GitHub pull request conversation", "unresolved review follow-up"]
+    })
+  ];
+
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+
+  assert.equal(timeline.schemaVersion, "activity-timeline.v1");
+  assert.equal(timeline.textCapturePolicy, "visible_text_ocr_only");
+  assert.equal(timeline.scaleSummary.frameCount, 3);
+  assert.equal(timeline.scaleSummary.snapshotCount, 3);
+  assert.equal(timeline.scaleSummary.commonTaskCount, 1);
+  assert.equal(timeline.scaleSummary.representativeSnapshotCap, 50);
+  assert.equal(timeline.snapshots.length, 3);
+  assert.equal(timeline.segments.length, 1);
+  assert.equal(timeline.commonTasks.length, 1);
+  assert.equal(timeline.commonTasks[0].frameCount, 3);
+  assert.equal(timeline.commonTasks[0].segmentCount, 1);
+  assert.equal(timeline.commonTasks[0].evidenceTrail.length, 3);
+  assert.match(timeline.commonTasks[0].evidenceTrail[0].keyTasks.join(" "), /engineering|code|review/i);
+  assert.equal(timeline.segments[0].dwellTimeSeconds, 360);
+  assert.equal(timeline.segments[0].surfaceSwitchCount, 2);
+  assert.deepEqual(timeline.segments[0].evidenceIds, [
+    "dev-frame-001-evidence",
+    "dev-frame-002-evidence",
+    "dev-frame-003-evidence"
+  ]);
+  assert.match(timeline.segments[0].userIntent, /engineering|review/i);
+});
+
+test("activity timeline splits large gaps and stores only redacted visible snippets", () => {
+  const frames = [
+    syntheticFrame({
+      id: "safe-frame-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Terminal",
+      windowTitle: "Visible console",
+      visibleIntent: "Inspecting a visible console error.",
+      evidence: [
+        "https://example.test/path?token=abc",
+        "password reset token appears on screen",
+        "visible console error summary"
+      ]
+    }),
+    syntheticFrame({
+      id: "safe-frame-002",
+      capturedAt: "2026-05-30T09:11:01.000Z",
+      appName: "Terminal",
+      windowTitle: "Visible console",
+      visibleIntent: "Inspecting a visible console error after a long pause.",
+      evidence: ["visible console retry summary"]
+    })
+  ];
+
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+  const serialized = JSON.stringify(timeline);
+  const keyText = collectKeys(timeline).join(" ");
+
+  assert.equal(timeline.segments.length, 2);
+  assert.equal(timeline.commonTasks.length, 1);
+  assert.equal(timeline.commonTasks[0].segmentCount, 2);
+  assert.equal(timeline.commonTasks[0].segmentIds.length, 2);
+  assert.deepEqual(timeline.commonTasks[0].evidenceIds, [
+    "safe-frame-001-evidence",
+    "safe-frame-002-evidence"
+  ]);
+  assert.doesNotMatch(serialized, /example\.test\/path\?/);
+  assert.doesNotMatch(serialized, /password reset token/);
+  assert.match(serialized, /visible console error summary/);
+  assert.doesNotMatch(keyText, /keystroke|clipboard|audio|rawDocument|rawMessage/i);
+  assert.doesNotThrow(() => assertPrivacySafe(timeline, "activityTimeline"));
+});
+
+test("activity timeline classifies by primary frame intent before secondary surfaces", () => {
+  const frames = [
+    syntheticFrame({
+      id: "mixed-attendance-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Browser",
+      windowTitle: "Archived capture",
+      visibleIntent: "Review attendance report follow-up and reconciliation.",
+      activities: ["attendance review"],
+      evidence: [
+        "Attendance report needs manual reconciliation",
+        "Secondary console output and GitHub pull request are visible in another window"
+      ],
+      keyTasks: [
+        "Review attendance report evidence",
+        "Reconcile visible evidence and quality checks"
+      ]
+    }),
+    syntheticFrame({
+      id: "mixed-development-001",
+      capturedAt: "2026-05-30T09:01:00.000Z",
+      appName: "Cursor",
+      windowTitle: "Archived capture",
+      visibleIntent: "Debugging and reviewing code for validation errors.",
+      activities: ["code review and debugging"],
+      evidence: [
+        "Code editor and terminal error output are the main work surface",
+        "A secondary attendance report is visible in another browser window"
+      ],
+      keyTasks: [
+        "Review engineering work and code context",
+        "Inspect command output and troubleshoot blockers"
+      ]
+    })
+  ];
+
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+
+  assert.equal(timeline.segments.length, 2);
+  assert.equal(timeline.commonTasks.length, 2);
+  assert.equal(timeline.segments[0].title, "Attendance report review workflow");
+  assert.equal(timeline.segments[1].title, "Development review and reporting workflow");
+  assert.match(timeline.segments[0].evidenceTrail[0].keyTasks.join(" "), /attendance/i);
+  assert.match(timeline.segments[1].evidenceTrail[0].keyTasks.join(" "), /engineering|command|troubleshoot/i);
+});
+
+test("activity timeline caps representative evidence while preserving full frame counts", () => {
+  const frames = Array.from({ length: 64 }, (_, index) => syntheticFrame({
+    id: `scale-frame-${String(index + 1).padStart(3, "0")}`,
+    capturedAt: `2026-05-30T09:${String(Math.floor(index / 4)).padStart(2, "0")}:${String((index % 4) * 10).padStart(2, "0")}.000Z`,
+    appName: "Browser",
+    windowTitle: "Attendance report",
+    visibleIntent: "Review attendance report follow-up and reconciliation.",
+    activities: ["attendance review"],
+    evidence: ["Attendance report needs manual reconciliation"],
+    keyTasks: [
+      "Review attendance report evidence",
+      "Reconcile visible evidence and quality checks"
+    ]
+  }));
+
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+
+  assert.equal(timeline.scaleSummary.frameCount, 64);
+  assert.equal(timeline.scaleSummary.snapshotCount, 50);
+  assert.equal(timeline.scaleSummary.segmentCount, 1);
+  assert.equal(timeline.scaleSummary.commonTaskCount, 1);
+  assert.equal(timeline.scaleSummary.representativeSnapshotCap, 50);
+  assert.equal(timeline.scaleSummary.representativeEvidenceIdCap, 50);
+  assert.equal(timeline.scaleSummary.evidenceTrailCap, 20);
+  assert.equal(timeline.segments.length, 1);
+  assert.equal(timeline.snapshots.length, 50);
+  assert.equal(timeline.segments[0].frameCount, 64);
+  assert.equal(timeline.segments[0].evidenceIds.length, 50);
+  assert.equal(timeline.segments[0].evidenceTrail.length, 20);
+  assert.equal(timeline.commonTasks.length, 1);
+  assert.equal(timeline.commonTasks[0].frameCount, 64);
+  assert.equal(timeline.commonTasks[0].segmentCount, 1);
+  assert.equal(timeline.commonTasks[0].evidenceIds.length, 50);
+  assert.equal(timeline.commonTasks[0].evidenceTrail.length, 20);
+  assert.match(timeline.commonTasks[0].evidenceNarrative, /20 frame\(s\).*64 screenshot-backed evidence item\(s\)/);
+});
+
+test("activity timeline caps representative segment IDs while preserving full segment counts", () => {
+  const start = Date.parse("2026-05-30T08:00:00.000Z");
+  const frames = Array.from({ length: 48 }, (_, index) => syntheticFrame({
+    id: `repeat-segment-${String(index + 1).padStart(3, "0")}`,
+    capturedAt: new Date(start + index * 11 * 60 * 1000).toISOString(),
+    appName: "Browser",
+    windowTitle: "Attendance report",
+    visibleIntent: "Review attendance report follow-up and reconciliation.",
+    activities: ["attendance review"],
+    evidence: ["Attendance report needs manual reconciliation"],
+    keyTasks: [
+      "Review attendance report evidence",
+      "Reconcile visible evidence and quality checks"
+    ]
+  }));
+
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+
+  assert.equal(timeline.scaleSummary.frameCount, 48);
+  assert.equal(timeline.scaleSummary.segmentCount, 48);
+  assert.equal(timeline.scaleSummary.commonTaskCount, 1);
+  assert.equal(timeline.segments.length, 48);
+  assert.equal(timeline.commonTasks.length, 1);
+  assert.equal(timeline.commonTasks[0].segmentCount, 48);
+  assert.equal(timeline.commonTasks[0].segmentIds.length, 40);
+  assert.equal(timeline.commonTasks[0].frameCount, 48);
+  assert.equal(timeline.commonTasks[0].evidenceIds.length, 48);
 });
 
 test("runAnalysis retains day-scoped raw media by default after frame analysis", async () => {
@@ -708,7 +1049,9 @@ test("OpenAI analysis mode uses Responses API with redacted structured evidence"
   assert.equal(request.body.reasoning.effort, "high");
 
   const requestBody = JSON.stringify(request.body);
-  assert.match(requestBody, /redacted_structured_frame_evidence_only/);
+  assert.match(requestBody, /redacted_structured_timeline_and_frame_evidence_only/);
+  assert.match(requestBody, /activityTimeline/);
+  assert.match(requestBody, /dwellTimeSeconds/);
   assert.doesNotMatch(requestBody, /screenshotPath/);
   assert.doesNotMatch(requestBody, /raw-media/);
   assert.doesNotMatch(requestBody, /rawDocumentBody/);
@@ -739,7 +1082,10 @@ test("model evaluation compares candidate models with redacted weekly report evi
     root,
     day: "2026-05-30",
     models: ["gpt-5.5", "gpt-5-mini"],
-    env: { OPENAI_API_KEY: "test-key" },
+    env: {
+      OPENAI_API_KEY: "test-key",
+      LUCILLE_EVAL_BASELINE_MODEL: "model-evaluation-baseline"
+    },
     fetchImpl: async (url, options) => {
       const body = JSON.parse(options.body);
       requests.push({ url, body });
@@ -901,12 +1247,33 @@ test("weekly report writes privacy-safe Markdown from structured analysis artifa
   assert.equal(result.schemaVersion, "daily-report.v1");
   assert.equal(result.reportPath, path.join("output", "reports", "2026-05-30.md"));
   assert.equal(result.frameCount, 3);
+  assert.equal(result.timelineSegmentCount, 1);
   assert.equal(result.patternCount, 1);
-  assert.equal(result.proposalCount, 3);
+  assert.equal(result.proposalCount, 5);
+  assert.equal(result.commonTaskCount, 1);
   assert.match(report, /^# Lucille Weekly Efficiency Report: 2026-05-30/m);
   assert.match(report, /Estimated weekly time saving/);
   assert.match(report, /Organisation signal/);
   assert.match(report, /## Raw Media Lifecycle/);
+  assert.match(report, /## Activity Timeline/);
+  assert.match(report, /Frames represented: 3/);
+  assert.match(report, /Representative timeline snapshots stored: 3/);
+  assert.match(report, /Representative snapshot cap: 50 snapshot\(s\)/);
+  assert.match(report, /Representative evidence cap: 50 evidence ID\(s\) per cluster/);
+  assert.match(report, /Evidence trail cap: 20 frame-backed entry\(s\) per cluster/);
+  assert.match(report, /Aggregation strategy: common_tasks_group_repeated_timeline_segments_with_bounded_representative_evidence/);
+  assert.match(report, /## Common Tasks/);
+  assert.match(report, /Repeated across:/);
+  assert.match(report, /## Timeline Segments/);
+  assert.match(report, /Dwell time: 360 seconds/);
+  assert.match(report, /Cognitive hurdles/);
+  assert.match(report, /## Skills By Repeated Task/);
+  assert.match(report, /Representative evidence IDs: fixture-evidence-001, fixture-evidence-002, fixture-evidence-003/);
+  assert.match(report, /Matching skills:/);
+  assert.match(report, /Attendance report review workflow/);
+  assert.match(report, /employee_weekly_report/);
+  assert.match(report, /workflow_automation/);
+  assert.match(report, /ai_assistance/);
   assert.match(report, /## Skill Proposals/);
   assert.doesNotMatch(report, /storage\/captures/);
   assert.doesNotMatch(report, /raw-media\/.*\.png/);
@@ -919,6 +1286,14 @@ test("make report invokes dedicated report generation", () => {
 
   assert.match(reportTarget, /\$\(NODE\) "\$\(CLI\)" report --day "\$\(DAY\)"/);
   assert.doesNotMatch(reportTarget, /review --day/);
+});
+
+test("make verify-mmp invokes the release readiness gate", () => {
+  const makefile = readFileSync(path.join(process.cwd(), "Makefile"), "utf8");
+  const verifyTarget = makefile.match(/^verify-mmp:.*(?:\n\t.*)*/m)?.[0] ?? "";
+
+  assert.match(makefile, /make verify-mmp/);
+  assert.match(verifyTarget, /DAY="\$\(DAY\)" \$\(NPM\) run verify:mmp/);
 });
 
 test("approved skill export writes Claude Codex Cursor and ChatGPT bundles", async () => {
@@ -969,10 +1344,22 @@ test("approved skill export writes Claude Codex Cursor and ChatGPT bundles", asy
   const chatgptActions = JSON.parse(readFileSync(path.join(root, expectedFiles[5]), "utf8"));
 
   assert.match(claudeSkill, /Evidence IDs/);
+  assert.match(claudeSkill, /Repeated Task Context/);
+  assert.match(claudeSkill, /Evidence coverage: 3 frame\(s\) across 1 timeline segment\(s\)/);
+  assert.match(claudeSkill, /Representative evidence IDs: fixture-evidence-001, fixture-evidence-002, fixture-evidence-003/);
+  assert.match(claudeSkill, /Key tasks: .*attendance/i);
   assert.match(codexSkill, /Codex Instructions/);
+  assert.match(codexSkill, /Repeated Task Context/);
   assert.match(cursorRule, /alwaysApply: false/);
+  assert.match(cursorRule, /Repeated Task Context/);
   assert.match(chatgptInstructions, /# Instructions/);
+  assert.match(chatgptInstructions, /Repeated Task Context/);
   assert.match(chatgptKnowledge, /Confidence: 0\.74/);
+  assert.match(chatgptKnowledge, /Repeated Task Context/);
+  assert.equal(chatgptActions.repeatedTaskContexts.length, 1);
+  assert.equal(chatgptActions.repeatedTaskContexts[0].evidenceCount, 3);
+  assert.equal(chatgptActions.repeatedTaskContexts[0].evidenceIds.length, 3);
+  assert.match(chatgptActions.repeatedTaskContexts[0].topTasks.join(" "), /attendance/i);
   assert.deepEqual(chatgptActions.actions, []);
   assert.doesNotThrow(() => assertPrivacySafe({
     result,
@@ -991,6 +1378,14 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     day: "2026-05-30",
     model: "moondream:1.8b"
   });
+  const rawMediaDir = path.join(root, "storage", "captures", "2026-05-30", "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  for (const evidenceId of ["fixture-evidence-001", "fixture-evidence-002", "fixture-evidence-003"]) {
+    writeFileSync(path.join(rawMediaDir, `${evidenceId}.png`), "fixture frame bytes");
+  }
+  mkdirSync(path.join(root, "storage", "analysis", "2026-05-29"), { recursive: true });
+  writeFileSync(path.join(root, "storage", "analysis", "2026-05-29", "work-patterns.json"), "{}\n");
+  mkdirSync(path.join(root, "storage", "analysis", "not-a-day"), { recursive: true });
 
   const server = createSkillUiServer({ root });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1000,16 +1395,53 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
   try {
     const page = await fetch(`${baseUrl}/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Lucille Skills/);
+    const pageHtml = await page.text();
+    assert.match(pageHtml, /Lucille Skills/);
+    assert.match(pageHtml, /<select id="day">/);
+    assert.match(pageHtml, /<select id="sort">/);
+    assert.match(pageHtml, /Confidence high to low/);
+    assert.match(pageHtml, /<select id="category-filter">/);
+    assert.match(pageHtml, /<select id="confidence-filter">/);
+    assert.match(pageHtml, /High \(0\.80\+\)/);
+    assert.match(pageHtml, /Medium \(0\.60-0\.79\)/);
+    assert.match(pageHtml, /Low \(&lt;0\.60\)/);
+    assert.match(pageHtml, /<input id="search"/);
+    assert.match(pageHtml, /Common Tasks/);
+    assert.match(pageHtml, /<aside class="proposal-sidebar">/);
+    assert.match(pageHtml, /<h1>Proposals<\/h1>/);
+    assert.match(pageHtml, /id="common-tasks"/);
+    assert.match(pageHtml, /task-evidence/);
+    assert.match(pageHtml, /frame-preview/);
+    assert.match(pageHtml, /api\/raw-frame/);
+    assert.doesNotMatch(pageHtml, /type="date"/);
+
+    const daysResponse = await fetch(`${baseUrl}/api/analysis-days`);
+    assert.equal(daysResponse.status, 200);
+    const days = await daysResponse.json();
+    assert.deepEqual(days.days, ["2026-05-30"]);
 
     const loadedResponse = await fetch(`${baseUrl}/api/proposals?day=2026-05-30`);
     assert.equal(loadedResponse.status, 200);
     const loaded = await loadedResponse.json();
-    assert.equal(loaded.proposals.length, 3);
+    assert.equal(loaded.schemaVersion, "proposal-ui-data.v1");
+    assert.equal(loaded.proposals.length, 5);
+    assert.equal(loaded.proposalSet.proposals.length, 5);
+    assert.equal(loaded.commonTasks.length, 1);
+    assert.equal(loaded.commonTasks[0].evidenceIds.length, 3);
+    assert.match(loaded.commonTasks[0].evidenceNarrative, /frame\(s\).*timeline segment/i);
+    assert.ok(loaded.commonTasks[0].skills.length >= 3);
+    assert.ok(loaded.commonTasks[0].skills.some((skill) => skill.category === "employee_weekly_report"));
+    assert.ok(loaded.commonTasks[0].skills.some((skill) => skill.category === "workflow_automation"));
+    assert.ok(loaded.commonTasks[0].skills.some((skill) => skill.category === "ai_assistance"));
 
-    loaded.proposals[0].title = "Edited Attendance Report Review Assistant";
-    loaded.proposals[0].implementationSteps = [
-      ...loaded.proposals[0].implementationSteps.slice(0, 3),
+    const frameResponse = await fetch(`${baseUrl}/api/raw-frame?day=2026-05-30&evidenceId=fixture-evidence-001`);
+    assert.equal(frameResponse.status, 200);
+    assert.equal(frameResponse.headers.get("content-type"), "image/png");
+    assert.equal(await frameResponse.text(), "fixture frame bytes");
+
+    loaded.proposalSet.proposals[0].title = "Edited Attendance Report Review Assistant";
+    loaded.proposalSet.proposals[0].implementationSteps = [
+      ...loaded.proposalSet.proposals[0].implementationSteps.slice(0, 3),
       "Confirm the edited skill still cites screenshot-backed evidence."
     ];
 
@@ -1020,7 +1452,17 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     });
     assert.equal(savedResponse.status, 200);
     const saved = await savedResponse.json();
+    assert.equal(saved.schemaVersion, "proposal-ui-data.v1");
     assert.equal(saved.proposals[0].title, "Edited Attendance Report Review Assistant");
+    assert.ok(saved.commonTasks[0].skills.some((skill) => skill.title === "Edited Attendance Report Review Assistant"));
+
+    const refreshedTaskSummary = JSON.parse(readFileSync(
+      path.join(root, "storage", "analysis", "2026-05-30", "task-skill-summary.json"),
+      "utf8"
+    ));
+    assert.ok(refreshedTaskSummary.commonTasks[0].skills.some((skill) => (
+      skill.title === "Edited Attendance Report Review Assistant"
+    )));
 
     const generateResponse = await fetch(`${baseUrl}/api/generate`, {
       method: "POST",
@@ -1040,7 +1482,14 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     assert.match(downloadResponse.headers.get("content-disposition"), /skill-bundle\.json/);
     const bundle = await downloadResponse.json();
     assert.equal(bundle.schemaVersion, "skill-download-bundle.v1");
+    assert.equal(bundle.repeatedTaskContexts.length, 1);
+    assert.equal(bundle.repeatedTaskContexts[0].evidenceCount, 3);
+    assert.equal(bundle.repeatedTaskContexts[0].evidenceIds.length, 3);
     assert.equal(bundle.files.length, 6);
+    assert.match(
+      bundle.files.find((file) => file.path.endsWith("codex/SKILL.md")).content,
+      /Repeated Task Context/
+    );
     assert.match(
       bundle.files.find((file) => file.path.endsWith("codex/SKILL.md")).content,
       /Edited Attendance Report Review Assistant/
@@ -1188,6 +1637,8 @@ test("make capture loops explicit frame ingestion at the configured interval", (
   const captureTarget = makefile.match(/^capture:.*(?:\n\t.*)*/m)?.[0] ?? "";
 
   assert.match(makefile, /^CAPTURE_INTERVAL \?= 3$/m);
+  assert.match(makefile, /^OPERATOR_SMOKE_CAPTURE_COUNT \?= 3$/m);
+  assert.match(makefile, /^OPERATOR_SMOKE_CAPTURE_INTERVAL \?= \$\(CAPTURE_INTERVAL\)$/m);
   assert.match(makefile, /^ANALYSE_LIMIT \?=$/m);
   assert.match(makefile, /^ANALYSE_OFFSET \?= 0$/m);
   assert.match(makefile, /--limit \$\(ANALYSE_LIMIT\) --offset \$\(ANALYSE_OFFSET\)/);
@@ -1306,6 +1757,7 @@ test("operator smoke preflight checks Ollama before any capture command", () => 
         ...process.env,
         MAKE: fakeMake,
         OLLAMA_HOST: "http://127.0.0.1:1",
+        LUCILLE_LOCAL_MODEL: "moondream:1.8b",
         LUCILLE_REAL_CAPTURE_ACK: ""
       },
       encoding: "utf8",
@@ -1317,6 +1769,32 @@ test("operator smoke preflight checks Ollama before any capture command", () => 
   assert.equal(readFileSync(path.join(root, "make-calls.log"), "utf8"), "build\n");
   assert.equal(existsSync(path.join(root, "storage", "captures")), false);
   assert.equal(existsSync(path.join(root, "logs", "ralf", "operator-smoke.json")), false);
+});
+
+test("operator smoke validates the generated weekly efficiency report heading", () => {
+  const source = readFileSync(path.join(process.cwd(), "scripts", "operator-smoke.mjs"), "utf8");
+
+  assert.match(source, /# Lucille Weekly Efficiency Report:/);
+  assert.doesNotMatch(source, /# Lucille Daily Report:/);
+});
+
+test("operator smoke captures a bounded multi-frame sequence before MMP verification", () => {
+  const source = readFileSync(path.join(process.cwd(), "scripts", "operator-smoke.mjs"), "utf8");
+  const makefile = readFileSync(path.join(process.cwd(), "Makefile"), "utf8");
+  const operatorSmokeTarget = makefile.match(/^operator-smoke:.*(?:\n\t.*)*/m)?.[0] ?? "";
+  const existingSmokeTarget = makefile.match(/^operator-smoke-existing:.*(?:\n\t.*)*/m)?.[0] ?? "";
+
+  assert.match(source, /LUCILLE_OPERATOR_SMOKE_CAPTURE_COUNT \?\? "3"/);
+  assert.match(source, /function captureSmokeSequence/);
+  assert.match(source, /for \(let index = 0; index < count; index \+= 1\)/);
+  assert.match(source, /captureCountRequested/);
+  assert.match(source, /fromExistingEvidence/);
+  assert.match(source, /existing_day_evidence/);
+  assert.match(source, /fresh_capture_sequence/);
+  assert.match(source, /run\(make, \["verify-mmp", `DAY=\$\{day\}`\]\)/);
+  assert.match(operatorSmokeTarget, /--capture-count \$\(OPERATOR_SMOKE_CAPTURE_COUNT\)/);
+  assert.match(operatorSmokeTarget, /--capture-interval \$\(OPERATOR_SMOKE_CAPTURE_INTERVAL\)/);
+  assert.match(existingSmokeTarget, /--from-existing-evidence/);
 });
 
 test("capture-once enforces excluded apps before observations reach analysis", () => {
@@ -1584,9 +2062,11 @@ test("RALF status reports generated MMP workflow evidence separately from scaffo
     encoding: "utf8"
   });
 
-  assert.match(output, /MMP workflow evidence: 7\/8/);
+  assert.match(output, /MMP workflow evidence: 9\/10/);
   assert.match(output, /ok\s+Capture observations JSONL/);
   assert.match(output, /ok\s+Frame analysis JSONL/);
+  assert.match(output, /ok\s+Activity timeline JSON/);
+  assert.match(output, /ok\s+Task-skill summary JSON/);
   assert.match(output, /ok\s+Daily report Markdown/);
   assert.match(output, /ok\s+Approved export bundle/);
   assert.match(output, /--\s+Operator environment smoke/);
@@ -1608,7 +2088,7 @@ test("RALF status does not count an empty raw-media directory as capture evidenc
 
   assert.match(output, /--\s+Capture observations JSONL/);
   assert.match(output, /--\s+Day-scoped raw media directory/);
-  assert.match(output, /MMP workflow evidence: 0\/8/);
+  assert.match(output, /MMP workflow evidence: 0\/10/);
   assert.match(output, /MMP status: not ready/);
 });
 
@@ -1635,7 +2115,7 @@ test("RALF status requires capture observations to match observation.v1 schema",
 
   assert.match(output, /--\s+Capture observations JSONL/);
   assert.match(output, /--\s+Day-scoped raw media directory/);
-  assert.match(output, /MMP workflow evidence: 0\/8/);
+  assert.match(output, /MMP workflow evidence: 0\/10/);
   assert.match(output, /MMP status: not ready/);
 });
 
@@ -1687,10 +2167,15 @@ test("RALF status rejects operator smoke evidence when workflow artifacts are no
       privacyReview: true,
       provider: "ollama",
       model: "moondream:1.8b",
+      captureMode: "existing_day_evidence",
+      captureCountRequested: 3,
+      captureIntervalSeconds: 3,
+      mmpReady: true,
+      mmpReadiness: smokeReadinessSummary({ frameCount: 3 }),
       evidence: {
-        observations: 1,
-        rawMediaFilesCaptured: 1,
-        frameAnalysis: 1,
+        observations: 3,
+        rawMediaFilesCaptured: 3,
+        frameAnalysis: 3,
         report: "output/reports/2026-05-30.md",
         approvedExport: `output/skills/2026-05-30/${proposalId}`
       }
@@ -1706,7 +2191,7 @@ test("RALF status rejects operator smoke evidence when workflow artifacts are no
     encoding: "utf8"
   });
 
-  assert.match(output, /MMP workflow evidence: 7\/8/);
+  assert.match(output, /MMP workflow evidence: 9\/10/);
   assert.match(output, /--\s+Operator environment smoke/);
   assert.match(output, /MMP status: not ready/);
 });
@@ -1716,21 +2201,23 @@ test("RALF status accepts same-day Ollama smoke evidence with retained raw media
   const captureDir = path.join(root, "storage", "captures", "2026-05-30");
   const rawMediaDir = path.join(captureDir, "raw-media");
   mkdirSync(rawMediaDir, { recursive: true });
-  writeFileSync(path.join(rawMediaDir, "obs-local-001.png"), "local fixture image");
+  for (const id of ["obs-local-001", "obs-local-002", "obs-local-003"]) {
+    writeFileSync(path.join(rawMediaDir, `${id}.png`), "local fixture image");
+  }
   writeFileSync(
     path.join(captureDir, "observations.jsonl"),
-    JSON.stringify({
+    ["obs-local-001", "obs-local-002", "obs-local-003"].map((id, index) => JSON.stringify({
       schemaVersion: "observation.v1",
-      id: "obs-local-001",
-      capturedAt: "2026-05-30T09:00:00.000Z",
+      id,
+      capturedAt: `2026-05-30T09:00:0${index}.000Z`,
       appName: "Cursor",
       windowTitle: "Lucille project workspace",
       domain: null,
       activity: "code_editing",
       visibleTextSummary: "A visible screen frame was captured for local analysis.",
       redactedSignals: ["explicit local capture"],
-      evidenceIds: ["obs-local-001-raw-frame"]
-    }) + "\n"
+      evidenceIds: [`${id}-raw-frame`]
+    })).join("\n") + "\n"
   );
 
   await runAnalysis({
@@ -1774,10 +2261,15 @@ test("RALF status accepts same-day Ollama smoke evidence with retained raw media
       privacyReview: true,
       provider: "ollama",
       model: "moondream:1.8b",
+      captureMode: "existing_day_evidence",
+      captureCountRequested: 3,
+      captureIntervalSeconds: 3,
+      mmpReady: true,
+      mmpReadiness: smokeReadinessSummary({ frameCount: 3 }),
       evidence: {
-        observations: 1,
-        rawMediaFilesCaptured: 1,
-        frameAnalysis: 1,
+        observations: 3,
+        rawMediaFilesCaptured: 3,
+        frameAnalysis: 3,
         report: "output/reports/2026-05-30.md",
         approvedExport: `output/skills/2026-05-30/${proposalId}`
       }
@@ -1793,7 +2285,7 @@ test("RALF status accepts same-day Ollama smoke evidence with retained raw media
     encoding: "utf8"
   });
 
-  assert.match(output, /MMP workflow evidence: 8\/8/);
+  assert.match(output, /MMP workflow evidence: 10\/10/);
   assert.match(output, /ok\s+Operator environment smoke/);
   assert.match(output, /MMP status: not ready/);
 });
@@ -1868,7 +2360,10 @@ test("RALF status rejects unsafe approved export artifacts", async () => {
       localVisualProvider: true,
       privacyReview: true,
       provider: "ollama",
-      model: "moondream:1.8b"
+      model: "moondream:1.8b",
+      captureMode: "existing_day_evidence",
+      mmpReady: true,
+      mmpReadiness: smokeReadinessSummary()
     }, null, 2) + "\n"
   );
 
@@ -1883,7 +2378,7 @@ test("RALF status rejects unsafe approved export artifacts", async () => {
 
   assert.match(output, /--\s+Approved export bundle/);
   assert.match(output, /--\s+Operator environment smoke/);
-  assert.match(output, /MMP workflow evidence: 6\/8/);
+  assert.match(output, /MMP workflow evidence: 8\/10/);
   assert.match(output, /MMP status: not ready/);
 });
 
@@ -1903,6 +2398,25 @@ function firstProposalId(root, day) {
   return proposals.proposals[0].id;
 }
 
+function smokeReadinessSummary(options = {}) {
+  const frameCount = options.frameCount ?? 1;
+  return {
+    frameCount,
+    commonTaskCount: 1,
+    taskSkillSummaryCount: 1,
+    repeatedTaskFrameCount: frameCount,
+    patternCount: 1,
+    proposalCount: 5,
+    proposalCategories: [
+      "employee_weekly_report",
+      "workflow_automation",
+      "ai_assistance",
+      "manager_monitoring",
+      "enterprise_rollout"
+    ]
+  };
+}
+
 function fixtureRoot() {
   const root = mkdtempSync(path.join(os.tmpdir(), "lucille-analysis-"));
   const fixturesDir = path.join(root, "fixtures");
@@ -1912,6 +2426,43 @@ function fixtureRoot() {
     path.join(fixturesDir, "mock-observations.json")
   );
   return root;
+}
+
+function syntheticFrame(options = {}) {
+  const id = options.id ?? "synthetic-frame-001";
+  const day = options.day ?? "2026-05-30";
+  const evidenceId = options.evidenceId ?? `${id}-evidence`;
+
+  return {
+    schemaVersion: "frame-analysis.v1",
+    evidenceId,
+    frameId: id,
+    day,
+    capturedAt: options.capturedAt ?? `${day}T09:00:00.000Z`,
+    provider: "mock",
+    model: "test-model",
+    surface: {
+      appName: options.appName ?? "Cursor",
+      windowTitle: options.windowTitle ?? "Lucille project workspace",
+      domain: options.domain ?? null
+    },
+    activities: options.activities ?? ["visible_work"],
+    visibleIntent: options.visibleIntent ?? "Reviewing a visible work surface.",
+    keyTasks: options.keyTasks ?? ["Review a visible work surface"],
+    evidence: (options.evidence ?? ["visible workflow summary"]).map((summary, index) => ({
+      id: `${id}-summary-${String(index + 1).padStart(2, "0")}`,
+      kind: "local_visual_summary",
+      summary
+    })),
+    redactions: [],
+    riskFlags: options.riskFlags ?? []
+  };
+}
+
+function collectKeys(value) {
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectKeys(item));
+  return Object.entries(value).flatMap(([key, child]) => [key, ...collectKeys(child)]);
 }
 
 function writeFakeMake(root) {

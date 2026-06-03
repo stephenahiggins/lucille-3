@@ -53,18 +53,18 @@ make analyse
 ```
 
 Both commands build the CLI wrapper first. `DAY`, `MODEL`, `PROVIDER`, `OPENAI`, and related options are still available as Make variables when needed.
-The CLI automatically loads a repo-local `.env` file before running commands, so hosted synthesis and model evaluation can use `OPENAI_API_KEY` without exporting it in the shell.
+The CLI automatically loads a repo-local `.env` file before running commands, so hosted synthesis, model evaluation, and local model choices can be configured without exporting them in the shell.
 
 Defaults:
 
 - `DAY`: today
 - `CAPTURE_INTERVAL`: `3` seconds
-- `MODEL`: `moondream:1.8b`
+- `MODEL`: from `LUCILLE_LOCAL_MODEL` in `.env`
 - `PROVIDER`: `auto`
 - `ANALYSE_LIMIT`: unset, meaning all observations
 - `ANALYSE_OFFSET`: `0`
-- `OPENAI_MODEL`: `gpt-5.5`
-- `EVAL_MODELS`: `gpt-5.5`
+- `OPENAI_MODEL`: from `LUCILLE_OPENAI_MODEL` in `.env`
+- `EVAL_MODELS`: from `LUCILLE_EVAL_MODELS` in `.env`
 - `REASONING_EFFORT`: `high`
 - `DELETE_RAW_MEDIA`: `0`
 - `APPROVE_EXPORT`: `0`
@@ -83,7 +83,7 @@ Persisted observations include only bounded structured metadata: observation id,
 
 Capture-once treats raw media and observations as a single accepted frame. If `screencapture` or an injected capture command fails after creating a partial image file, Lucille deletes that partial raw media and does not append an observation.
 
-`make analyse` defaults to `PROVIDER=auto` and `MODEL=moondream:1.8b`. In auto mode Lucille uses local Ollama for real captured observations with day-scoped raw media. If a real capture exists but raw media or Ollama is unavailable, analysis fails clearly instead of falling back to mock evidence. Mock analysis is used only for fixture-backed runs without captured observations, or when `PROVIDER=mock` is selected explicitly for deterministic testing. Explicit `PROVIDER=ollama` fails clearly if `storage/captures/<DAY>/raw-media/<OBSERVATION_ID>.<png|jpg|jpeg|webp>` is missing or Ollama is not reachable. Analysis writes:
+`make analyse` defaults to `PROVIDER=auto` and reads the local model from `LUCILLE_LOCAL_MODEL` in `.env`. In auto mode Lucille uses local Ollama for real captured observations with day-scoped raw media. If a real capture exists but raw media or Ollama is unavailable, analysis fails clearly instead of falling back to mock evidence. Mock analysis is used only for fixture-backed runs without captured observations, or when `PROVIDER=mock` is selected explicitly for deterministic testing. Explicit `PROVIDER=ollama` fails clearly if `storage/captures/<DAY>/raw-media/<OBSERVATION_ID>.<png|jpg|jpeg|webp>` is missing or Ollama is not reachable. Analysis writes:
 
 For local vision testing, analyse a small chunk first:
 
@@ -92,21 +92,23 @@ make analyse DAY=2026-06-01 PROVIDER=ollama ANALYSE_LIMIT=5
 make analyse DAY=2026-06-01 PROVIDER=ollama ANALYSE_LIMIT=5 ANALYSE_OFFSET=5
 ```
 
-For the heavier local Llama vision model installed through Ollama:
+To try a different local vision model for one run:
 
 ```bash
-make analyse DAY=2026-06-01 PROVIDER=ollama MODEL=llama3.2-vision:latest ANALYSE_LIMIT=5
+make analyse DAY=2026-06-01 PROVIDER=ollama MODEL=<model-name> ANALYSE_LIMIT=5
 ```
 
 - `storage/analysis/<DAY>/frame-analysis.jsonl`
+- `storage/analysis/<DAY>/activity-timeline.json`
 - `storage/analysis/<DAY>/work-patterns.json`
 - `storage/analysis/<DAY>/skill-proposals.json`
+- `storage/analysis/<DAY>/task-skill-summary.json`
 
 `make report DAY=<DAY>` reads those structured artifacts and writes a Markdown report to:
 
 - `output/reports/<DAY>.md`
 
-Reports include frame counts, provider/model details, capture surfaces, raw media lifecycle counts, work patterns, skill proposals, and privacy notes. They do not include raw screenshots, raw media paths, full URLs with query strings, raw document bodies, or raw message bodies.
+Reports include frame counts, provider/model details, capture surfaces, raw media lifecycle counts, repeated common tasks, work patterns, skill proposals, and privacy notes. They do not include raw screenshots, raw media paths, full URLs with query strings, raw document bodies, or raw message bodies.
 
 `make model-eval DAY=<DAY>` compares candidate OpenAI models against the Lucille weekly efficiency report task using the same redacted structured evidence. It writes:
 
@@ -138,15 +140,22 @@ In a headless or permission-limited environment, skip `make capture`; `make anal
 
 Lucille writes at least three local skill proposals for each analysed pattern: a weekly report skill, a workflow automation queue, and a drafting/assistance skill. Hosted synthesis can produce a broader portfolio, but the local path is enough for an operator to review and generate useful skill bundles.
 
+List the repeated tasks first, with the matching skills underneath each task:
+
+```bash
+node dist/cli.js tasks --day 2026-06-01
+```
+
 Start the local web UI to edit proposals, generate tool-specific skill files, and download a JSON bundle containing the Claude, Codex, Cursor, and ChatGPT artifacts:
 
 ```bash
 make ui DAY=2026-06-01
 ```
 
-Open the printed local URL. The UI reads and writes:
+Open the printed local URL. The UI reads the repeated-task summary and writes approved proposal/export changes:
 
 - `storage/analysis/<DAY>/skill-proposals.json`
+- `storage/analysis/<DAY>/task-skill-summary.json`
 - `output/skills/<DAY>/<PROPOSAL_ID>/`
 
 Skill export is approval-gated. Preview planned files without writing tool-specific output:
@@ -192,6 +201,9 @@ When raw media files exist under a day-scoped `raw-media` capture directory, `sr
 ```bash
 npm run typecheck --if-present
 npm test --if-present
+make verify-mmp DAY=2026-06-01
 make analyse
 node scripts/summarise-ralf-status.mjs
 ```
+
+`make verify-mmp` validates the repeated-task evidence chain for a day: frame key tasks, activity timeline common tasks, work patterns, skill proposals, task-skill summaries, report sections, and exported skill context. `make operator-smoke` runs the same gate after real capture, local Ollama analysis, report generation, and approved skill export, then records the MMP readiness counts in `logs/ralf/operator-smoke.json`.

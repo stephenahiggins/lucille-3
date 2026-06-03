@@ -1,12 +1,15 @@
 DAY ?= $(shell date +%F)
+-include .env
 CAPTURE_INTERVAL ?= 3
-MODEL ?= moondream:1.8b
+OPERATOR_SMOKE_CAPTURE_COUNT ?= 3
+OPERATOR_SMOKE_CAPTURE_INTERVAL ?= $(CAPTURE_INTERVAL)
+MODEL ?= $(LUCILLE_LOCAL_MODEL)
 PROVIDER ?= auto
 ANALYSE_LIMIT ?=
 ANALYSE_OFFSET ?= 0
 OPENAI ?= 0
-OPENAI_MODEL ?= gpt-5.5
-EVAL_MODELS ?= gpt-5.5
+OPENAI_MODEL ?= $(LUCILLE_OPENAI_MODEL)
+EVAL_MODELS ?= $(LUCILLE_EVAL_MODELS)
 REASONING_EFFORT ?= high
 DELETE_RAW_MEDIA ?= 0
 APPROVE_EXPORT ?= 0
@@ -17,13 +20,14 @@ NODE ?= node
 NPM ?= npm
 CLI ?= dist/cli.js
 
-.PHONY: help dirs build capture capture-permission capture-pause capture-resume capture-stop capture-once analyse report model-eval export-skill ui recording-dist dist-ui-recording operator-smoke-preflight operator-smoke status ralf ralf-mmp ralf-closeout
+.PHONY: help dirs build capture capture-permission capture-pause capture-resume capture-stop capture-once analyse report model-eval export-skill ui recording-dist dist-ui-recording operator-smoke-preflight operator-smoke operator-smoke-existing verify-mmp status ralf ralf-mmp ralf-closeout
 
 help:
 	@echo "Lucille commands"
 	@echo "  make capture        # capture visible frames every $(CAPTURE_INTERVAL)s; Ctrl-C to stop"
 	@echo "  make analyse DAY=$(DAY) MODEL=$(MODEL) PROVIDER=$(PROVIDER) ANALYSE_LIMIT=$(ANALYSE_LIMIT) OPENAI=$(OPENAI)"
 	@echo "  make model-eval     # compare OpenAI models for weekly efficiency report quality"
+	@echo "  make verify-mmp     # validate the repeated-task evidence-to-skill MMP gate"
 	@echo "  make ui             # edit, generate, and download skill proposals in a local web UI"
 
 dirs:
@@ -84,7 +88,10 @@ capture-once: build
 
 analyse: build
 	@if [ -f "$(CLI)" ]; then \
-		ARGS="analyse --day $(DAY) --model $(MODEL) --provider $(PROVIDER)"; \
+		ARGS="analyse --day $(DAY) --provider $(PROVIDER)"; \
+		if [ -n "$(MODEL)" ]; then \
+			ARGS="$$ARGS --model $(MODEL)"; \
+		fi; \
 		if [ -n "$(ANALYSE_LIMIT)" ]; then \
 			ARGS="$$ARGS --limit $(ANALYSE_LIMIT) --offset $(ANALYSE_OFFSET)"; \
 		fi; \
@@ -92,12 +99,15 @@ analyse: build
 			ARGS="$$ARGS --delete-raw-media"; \
 		fi; \
 		if [ "$(OPENAI)" = "1" ]; then \
-			ARGS="$$ARGS --openai --openai-model $(OPENAI_MODEL) --reasoning-effort $(REASONING_EFFORT)"; \
+			ARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \
+			if [ -n "$(OPENAI_MODEL)" ]; then \
+				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
+			fi; \
 		fi; \
 		echo "$(NODE) $(CLI) $$ARGS"; \
 		$(NODE) "$(CLI)" $$ARGS; \
 	else \
-		echo "Lucille CLI not found at $(CLI). Intended analysis: day=$(DAY), model=$(MODEL), openai=$(OPENAI), openai_model=$(OPENAI_MODEL)."; \
+		echo "Lucille CLI not found at $(CLI). Intended analysis: day=$(DAY), model=$${MODEL:-from .env}, openai=$(OPENAI), openai_model=$${OPENAI_MODEL:-from .env}."; \
 	fi
 
 report: build
@@ -109,7 +119,11 @@ report: build
 
 model-eval: build
 	@if [ -f "$(CLI)" ]; then \
-		$(NODE) "$(CLI)" eval-models --day "$(DAY)" --models "$(EVAL_MODELS)" --reasoning-effort "$(REASONING_EFFORT)"; \
+		ARGS="eval-models --day $(DAY) --reasoning-effort $(REASONING_EFFORT)"; \
+		if [ -n "$(EVAL_MODELS)" ]; then \
+			ARGS="$$ARGS --models $(EVAL_MODELS)"; \
+		fi; \
+		$(NODE) "$(CLI)" $$ARGS; \
 	else \
 		echo "Lucille CLI not found at $(CLI); model evaluation is unavailable until scaffolded."; \
 	fi
@@ -142,10 +156,22 @@ dist-ui-recording: build
 recording-dist: dist-ui-recording
 
 operator-smoke-preflight:
-	@$(NODE) scripts/operator-smoke.mjs --day "$(DAY)" --model "$(MODEL)" --provider ollama --preflight
+	@ARGS="--day $(DAY) --provider ollama --preflight"; \
+	if [ -n "$(MODEL)" ]; then ARGS="$$ARGS --model $(MODEL)"; fi; \
+	$(NODE) scripts/operator-smoke.mjs $$ARGS
 
 operator-smoke:
-	@$(NODE) scripts/operator-smoke.mjs --day "$(DAY)" --model "$(MODEL)" --provider ollama
+	@ARGS="--day $(DAY) --provider ollama --capture-count $(OPERATOR_SMOKE_CAPTURE_COUNT) --capture-interval $(OPERATOR_SMOKE_CAPTURE_INTERVAL)"; \
+	if [ -n "$(MODEL)" ]; then ARGS="$$ARGS --model $(MODEL)"; fi; \
+	$(NODE) scripts/operator-smoke.mjs $$ARGS
+
+operator-smoke-existing:
+	@ARGS="--day $(DAY) --provider ollama --from-existing-evidence --capture-count $(OPERATOR_SMOKE_CAPTURE_COUNT) --capture-interval $(OPERATOR_SMOKE_CAPTURE_INTERVAL)"; \
+	if [ -n "$(MODEL)" ]; then ARGS="$$ARGS --model $(MODEL)"; fi; \
+	$(NODE) scripts/operator-smoke.mjs $$ARGS
+
+verify-mmp: build
+	@DAY="$(DAY)" $(NPM) run verify:mmp
 
 status:
 	@$(NODE) scripts/summarise-ralf-status.mjs

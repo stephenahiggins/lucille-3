@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { resolveLocalModel } from "../config/models.mjs";
 import { assertPrivacySafe, privacyRedactions } from "../privacy/safety.mjs";
 
 const defaultEndpoint = "http://127.0.0.1:11434";
@@ -15,7 +16,10 @@ export class LocalVisualProviderUnavailable extends Error {
 export async function analyseObservationWithOllama(options = {}) {
   const root = options.root ?? process.cwd();
   const day = requireDay(options.day);
-  const model = requireText(options.model ?? "moondream:1.8b", "model", 120);
+  const model = requireText(resolveLocalModel({
+    value: options.model,
+    env: options.env
+  }), "model", 120);
   const endpoint = normalizeEndpoint(options.endpoint ?? defaultEndpoint);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
@@ -88,8 +92,10 @@ function buildOllamaRequest({ model, observation, imageBase64 }) {
     format: "json",
     prompt: [
       "Analyze this locally supplied visible screen frame for Lucille 3.",
-      "Return JSON only with keys: activity, visibleIntent, evidenceSummaries, riskFlags.",
-      "Use concise redacted summaries that name visible applications, pages, documents, and work context.",
+      "Return JSON only with keys: activity, visibleIntent, keyTasks, evidenceSummaries, riskFlags.",
+      "keyTasks must be 1-6 short task labels that describe what work the user is visibly doing, such as reviewing a report, reconciling evidence, drafting follow-up, troubleshooting command output, or reviewing code.",
+      "Use concise redacted summaries that name visible applications, pages, documents, UI state, console output categories, and short bounded visible text snippets.",
+      "Prefer evidence summaries that explain the user's likely action, visible intent, unresolved errors, repeated attempts, or review burden.",
       "Do not invent workflows that are not visible. Do not rely on import metadata as visual evidence.",
       "Do not transcribe raw document bodies, raw message bodies, passwords, tokens, cookies, full URLs, clipboard contents, keystrokes, or audio.",
       `Existing safe observation metadata: ${JSON.stringify({
@@ -121,6 +127,15 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
   const summaries = optionalTextArray(parsed.evidenceSummaries, "evidenceSummaries", 6, 160);
   const safeSummaries = summaries.length > 0 ? summaries : observation.redactedSignals;
   requireGroundedVisualSummaries(safeSummaries, observation.id);
+  const keyTasks = optionalTextArray(parsed.keyTasks, "keyTasks", 6, 120);
+  const taskContext = [
+    parsed.visibleIntent,
+    parsed.activity,
+    observation.activity,
+    observation.visibleTextSummary,
+    ...safeSummaries
+  ].join(" ");
+  const safeKeyTasks = normalizeFrameKeyTasks(keyTasks, taskContext);
 
   return {
     schemaVersion: "frame-analysis.v1",
@@ -137,6 +152,7 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     },
     activities: [requireText(parsed.activity ?? observation.activity, "activity", 80)],
     visibleIntent: requireText(parsed.visibleIntent ?? observation.visibleTextSummary, "visibleIntent", 500),
+    keyTasks: safeKeyTasks,
     evidence: safeSummaries.map((summary, index) => ({
       id: observation.evidenceIds[index] ?? `${observation.id}-local-visual-${String(index + 1).padStart(2, "0")}`,
       kind: "local_visual_summary",
@@ -145,6 +161,80 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     redactions: privacyRedactions(),
     riskFlags: optionalTextArray(parsed.riskFlags, "riskFlags", 8, 120)
   };
+}
+
+function inferFrameKeyTasks(text) {
+  const normalized = String(text ?? "").toLowerCase();
+  const primaryText = normalized.slice(0, 320);
+  const tasks = [];
+  const primary = primaryContext(primaryText);
+  const attendanceDominant = primary === "attendance" || (primary !== "development" && /\b(attendance|absence|parent|student|pupil|mis|sims)\b/.test(normalized));
+  const developmentDominant = primary === "development" || (/\b(github|pull request|\bpr\b|code|diff|repository|cursor|codex|terminal|console|npm|make|test)\b/.test(normalized) && !attendanceDominant);
+
+  if (attendanceDominant) {
+    tasks.push("Review attendance report evidence");
+  }
+  if (/\b(reconcile|reconciliation|check|qa|manual|review)\b/.test(normalized)) {
+    tasks.push("Reconcile visible evidence and quality checks");
+  }
+  if (/\b(email|message|draft|follow-up|communication|slack|teams|chat)\b/.test(normalized)) {
+    tasks.push("Draft or review follow-up communication");
+  }
+  if (developmentDominant) {
+    tasks.push("Review engineering work and code context");
+  }
+  if (developmentDominant && /\b(terminal|console|command|npm|make|test|build|error|failed|exception)\b/.test(normalized)) {
+    tasks.push("Inspect command output and troubleshoot blockers");
+  }
+  if (!developmentDominant && /\b(report|dashboard|chart|metric|spreadsheet|table|export)\b/.test(normalized)) {
+    tasks.push("Review report or dashboard state");
+  }
+  if (/\b(template|checklist|queue|todo|next action|status)\b/.test(normalized)) {
+    tasks.push("Organize next actions into reusable workflow structure");
+  }
+
+  const uniqueTasks = [...new Set(tasks)].slice(0, 6);
+  return uniqueTasks.length > 0 ? uniqueTasks : ["Review a visible work surface"];
+}
+
+function normalizeFrameKeyTasks(modelTasks, contextText) {
+  const inferred = inferFrameKeyTasks(contextText);
+  const normalized = String(contextText ?? "").toLowerCase();
+  const primary = primaryContext(normalized.slice(0, 320));
+  const attendanceDominant = primary === "attendance" || (primary !== "development" && /\b(attendance|absence|parent|student|pupil|mis|sims)\b/.test(normalized));
+  const developmentDominant = primary === "development";
+  const allowed = [];
+
+  for (const task of modelTasks) {
+    const lower = task.toLowerCase();
+    const looksDevelopment = /\b(code|github|pull request|console|command|terminal|test|debug|error)\b/.test(lower);
+    const looksAttendance = /\b(attendance|absence|student|pupil|report)\b/.test(lower);
+    if (attendanceDominant && looksDevelopment) continue;
+    if (developmentDominant && looksAttendance && !looksDevelopment) continue;
+    allowed.push(canonicalTaskLabel(task));
+  }
+
+  return [...new Set([...inferred, ...allowed])].slice(0, 6);
+}
+
+function primaryContext(text) {
+  const attendanceMatch = /\b(attendance|absence|parent|student|pupil|mis|sims)\b/.exec(text);
+  const developmentMatch = /\b(debugging|code review|reviewing code|testing code|observations\.mjs|hostname|pull request|terminal|console|npm|make|test)\b/.exec(text);
+  if (attendanceMatch && (!developmentMatch || attendanceMatch.index < developmentMatch.index)) return "attendance";
+  if (developmentMatch) return "development";
+  return "unknown";
+}
+
+function canonicalTaskLabel(task) {
+  const lower = task.toLowerCase();
+  if (/\b(attendance|absence|student|pupil)\b/.test(lower)) return "Review attendance report evidence";
+  if (/\b(reconcile|qa|quality|check)\b/.test(lower)) return "Reconcile visible evidence and quality checks";
+  if (/\b(email|message|draft|follow-up|slack|chat)\b/.test(lower)) return "Draft or review follow-up communication";
+  if (/\b(code|github|pull request|pr|diff)\b/.test(lower)) return "Review engineering work and code context";
+  if (/\b(console|command|terminal|test|debug|error|troubleshoot)\b/.test(lower)) return "Inspect command output and troubleshoot blockers";
+  if (/\b(report|dashboard|chart|metric|spreadsheet|table)\b/.test(lower)) return "Review report or dashboard state";
+  if (/\b(queue|todo|status|next action|checklist)\b/.test(lower)) return "Organize next actions into reusable workflow structure";
+  return requireTextWithinLimit(task, "keyTask", 120);
 }
 
 function requireGroundedVisualSummaries(summaries, observationId) {

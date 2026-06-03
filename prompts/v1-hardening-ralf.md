@@ -21,8 +21,8 @@ Prioritize blockers in this order:
    - `make capture`
    - `make analyse`
    - `make analyse DAY=YYYY-MM-DD`
-   - `make analyse MODEL=qwen2.5vl:7b`
-   - `make analyse OPENAI=1 OPENAI_MODEL=gpt-5.5`
+   - `make analyse`
+   - `make analyse OPENAI=1`
 
 3. Privacy-safe capture lifecycle
    - visible capture controls
@@ -34,12 +34,12 @@ Prioritize blockers in this order:
    - no audio capture
 
 4. Local screenshot analysis
-   - default model `qwen2.5vl:7b`
+   - default local model read from `LUCILLE_LOCAL_MODEL` in `.env`
    - structured frame-level analysis
    - deterministic mock provider for tests and demos
    - raw media deleted after analysis unless debug retention is explicitly enabled
 
-5. GPT-5.5 synthesis layer
+5. Hosted synthesis layer
    - optional only
    - enabled by explicit CLI flag or Makefile `OPENAI=1`
    - requires `OPENAI_API_KEY`
@@ -122,4 +122,3 @@ At the end, report:
 - the next recommended slice
 
 Stay focused on v1 hardening. Do not build a polished desktop app, cloud backend, team dashboard, or autonomous workflow executor unless those are explicitly requested later.
-

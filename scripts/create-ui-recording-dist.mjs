@@ -47,6 +47,7 @@ mkdirSync(path.join(bundleRoot, "dist"), { recursive: true });
 cpSync(path.join(root, "dist", "cli.js"), path.join(bundleRoot, "dist", "cli.js"));
 writeFileSync(path.join(bundleRoot, "Makefile"), recorderMakefile(), "utf8");
 writeFileSync(path.join(bundleRoot, "README.md"), workComputerReadme(), "utf8");
+writeFileSync(path.join(bundleRoot, ".env.example"), recorderDotEnvExample(), "utf8");
 writeFileSync(path.join(bundleRoot, "package.json"), JSON.stringify(recorderPackageJson(), null, 2) + "\n", "utf8");
 writeFileSync(path.join(bundleRoot, ".gitignore"), recorderGitignore(), "utf8");
 
@@ -91,13 +92,14 @@ function recorderPackageJson() {
 
 function recorderMakefile() {
   return `DAY ?= $(shell date +%F)
+-include .env
 CAPTURE_INTERVAL ?= 3
-MODEL ?= moondream:1.8b
+MODEL ?= $(LUCILLE_LOCAL_MODEL)
 PROVIDER ?= auto
 ANALYSE_LIMIT ?=
 ANALYSE_OFFSET ?= 0
 OPENAI ?= 0
-OPENAI_MODEL ?= gpt-5.5
+OPENAI_MODEL ?= $(LUCILLE_OPENAI_MODEL)
 REASONING_EFFORT ?= high
 DELETE_RAW_MEDIA ?= 0
 NODE ?= node
@@ -125,7 +127,10 @@ capture: build
 \tdone
 
 analyse: build
-\t@ARGS="analyse --day $(DAY) --model $(MODEL) --provider $(PROVIDER)"; \\
+\t@ARGS="analyse --day $(DAY) --provider $(PROVIDER)"; \\
+\tif [ -n "$(MODEL)" ]; then \\
+\t\tARGS="$$ARGS --model $(MODEL)"; \\
+\tfi; \\
 \tif [ -n "$(ANALYSE_LIMIT)" ]; then \\
 \t\tARGS="$$ARGS --limit $(ANALYSE_LIMIT) --offset $(ANALYSE_OFFSET)"; \\
 \tfi; \\
@@ -133,7 +138,10 @@ analyse: build
 \t\tARGS="$$ARGS --delete-raw-media"; \\
 \tfi; \\
 \tif [ "$(OPENAI)" = "1" ]; then \\
-\t\tARGS="$$ARGS --openai --openai-model $(OPENAI_MODEL) --reasoning-effort $(REASONING_EFFORT)"; \\
+\t\tARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \\
+\t\tif [ -n "$(OPENAI_MODEL)" ]; then \\
+\t\t\tARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \\
+\t\tfi; \\
 \tfi; \\
 \techo "$(NODE) $(CLI) $$ARGS"; \\
 \t$(NODE) "$(CLI)" $$ARGS
@@ -141,10 +149,19 @@ analyse: build
 }
 
 function recorderGitignore() {
-  return `logs/
+  return `.env
+logs/
 node_modules/
 output/
 storage/
+`;
+}
+
+function recorderDotEnvExample() {
+  return `LUCILLE_LOCAL_MODEL=
+LUCILLE_OPENAI_MODEL=
+LUCILLE_EVAL_MODELS=
+LUCILLE_EVAL_BASELINE_MODEL=
 `;
 }
 
@@ -158,22 +175,23 @@ This is the portable Lucille recorder bundle for a macOS work computer.
 - macOS
 - Node.js 20 or newer
 - Make, included with Apple command line tools
-- Optional but recommended for real local visual analysis: Ollama with moondream:1.8b
+- Optional but recommended for real local visual analysis: Ollama with the model named in \`.env\`
 
 ## Run
 
 \`\`\`bash
 cd lucille-ui-recorder
+cp .env.example .env
 make capture
 make analyse
 \`\`\`
 
 \`make capture\` runs in the foreground and captures one visible frame every 3 seconds. Stop it with Ctrl-C. Override the interval with \`CAPTURE_INTERVAL=5 make capture\`. If macOS Screen Recording permission is not available, Lucille asks the OS for permission and opens System Settings to Privacy & Security > Screen Recording. Grant permission to the app running the command, such as Terminal, iTerm, VS Code, or Codex, then quit and reopen that app before rerunning \`make capture\`.
 
-\`make analyse\` defaults to \`MODEL=moondream:1.8b\` and \`PROVIDER=auto\`. Install the local model with:
+\`make analyse\` uses \`LUCILLE_LOCAL_MODEL\` from \`.env\` and \`PROVIDER=auto\`. Install the local model named there with:
 
 \`\`\`bash
-ollama pull moondream:1.8b
+ollama pull "$LUCILLE_LOCAL_MODEL"
 \`\`\`
 
 For a quick local vision test, run a small chunk first:
@@ -183,10 +201,10 @@ make analyse PROVIDER=ollama ANALYSE_LIMIT=5
 make analyse PROVIDER=ollama ANALYSE_LIMIT=5 ANALYSE_OFFSET=5
 \`\`\`
 
-To use the heavier local Llama vision model:
+To try a different local vision model, update \`LUCILLE_LOCAL_MODEL\` in \`.env\` or pass \`MODEL=<name>\` for one run:
 
 \`\`\`bash
-make analyse PROVIDER=ollama MODEL=llama3.2-vision:latest ANALYSE_LIMIT=5
+make analyse PROVIDER=ollama MODEL=<model-name> ANALYSE_LIMIT=5
 \`\`\`
 
 Captured frames are stored under \`storage/captures/<DAY>/raw-media/\` and retained by default after analysis. Set \`DELETE_RAW_MEDIA=1\` only when you explicitly want analysis to delete day-scoped raw media after producing structured local analysis artifacts.

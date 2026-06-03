@@ -20,7 +20,7 @@ The remaining blockers are:
 
 2. Real local visual provider smoke evidence
    - Prefer Ollama at `http://127.0.0.1:11434`.
-   - Keep `qwen2.5vl:7b` as the default model.
+   - Keep the default model in `LUCILLE_LOCAL_MODEL` in `.env`.
    - Do not send raw screenshots to OpenAI.
    - A real provider smoke should fail clearly if Ollama or the model is unavailable.
    - If the smoke succeeds, persist a minimal redacted `logs/ralf/operator-smoke.json` with `schemaVersion: "operator-smoke.v1"`, `realCaptureIngestion: true`, `localVisualProvider: true`, and `privacyReview: true`.
@@ -30,7 +30,7 @@ The remaining blockers are:
    - The operator smoke should run, in order:
      - build
      - explicit acknowledged capture
-     - `make analyse DAY=<day> PROVIDER=ollama MODEL=qwen2.5vl:7b`
+     - `make analyse DAY=<day> PROVIDER=ollama`
      - `make report DAY=<day>`
      - `make export-skill DAY=<day> APPROVE_EXPORT=1`
      - artifact validation
