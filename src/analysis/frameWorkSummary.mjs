@@ -13,7 +13,7 @@ export function normalizeFrameWorkSummary(frame) {
     visitedUrls: frame.visitedUrls
   });
   const repositoryHostCleanup = normalizeRepositoryHostHallucinations(calendarTeamsCleanup.applications);
-  const applications = repositoryHostCleanup.applications;
+  const applications = ensureSinglePrimaryApplication(repositoryHostCleanup.applications, frame.primaryApplication);
   const primaryApplication = frame.primaryApplication && applications.some((application) => application.name === frame.primaryApplication.name)
     ? frame.primaryApplication
     : applications.find((application) => application.isPrimary) ?? applications[0];
@@ -26,7 +26,7 @@ export function normalizeFrameWorkSummary(frame) {
     visitedUrls: normalizeVisitedUrlsForKnownHallucinations(normalizeVisitedUrlsForRepositoryHostCleanup(
       normalizeVisitedUrlsForCalendarTeamsCleanup(frame.visitedUrls, calendarTeamsCleanup),
       repositoryHostCleanup
-    ))
+    ), applications)
   };
   if (isGenericVisibleIntent(frame.visibleIntent)) {
     normalized.visibleIntent = buildVisibleIntent({ frame, primaryApplication, applications });
@@ -113,7 +113,7 @@ function hasSpecificDiscordSurface(application) {
 
 function looksLikeSlackSurface(application) {
   const text = `${application.windowTitle ?? ""} ${application.domain ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
-  return /\b(slack|slack\.com|arbor|workspace sidebar|purple sidebar|channel sidebar|chat and activity)\b/.test(text);
+  return /\b(slack|slack\.com|arbor|devops|branch-testing|workspace sidebar|purple sidebar|channel sidebar|chat and activity)\b/.test(text);
 }
 
 function normalizeCommunicationReason(text) {
@@ -147,6 +147,19 @@ function normalizeSensitiveCommunicationWindowTitle(application) {
     return `${name} notification`;
   }
   return windowTitle;
+}
+
+function ensureSinglePrimaryApplication(applications, primaryApplication) {
+  if (applications.length === 0) return applications;
+  let primaryIndex = applications.findIndex((application) => application.isPrimary);
+  if (primaryIndex === -1 && primaryApplication?.name) {
+    primaryIndex = applications.findIndex((application) => application.name === primaryApplication.name);
+  }
+  if (primaryIndex === -1) primaryIndex = 0;
+  return applications.map((application, index) => ({
+    ...application,
+    isPrimary: index === primaryIndex
+  }));
 }
 
 function normalizeCalendarTeamsHallucinations({ applications, visitedUrls }) {
@@ -247,9 +260,9 @@ function normalizeVisitedUrlsForCalendarTeamsCleanup(visitedUrls, cleanup) {
   });
 }
 
-function normalizeVisitedUrlsForKnownHallucinations(visitedUrls) {
+function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = []) {
   if (!Array.isArray(visitedUrls)) return visitedUrls;
-  return visitedUrls.filter((url) => {
+  return unique(visitedUrls.map(normalizeKnownUrlAlias).filter((url) => {
     try {
       const hostname = new URL(url).hostname.toLowerCase();
       return ![
@@ -259,13 +272,27 @@ function normalizeVisitedUrlsForKnownHallucinations(visitedUrls) {
         "lucille-ui-recorder.com",
         "arbor-education.github.io",
         "jira.com",
+        "chrome.com",
+        "arbor.allscan.net",
         "www.adobe.com",
         "www.apple.com"
-      ].includes(hostname);
+      ].includes(hostname) &&
+        !(hostname === "music.apple.com" && hasNativeMusicApplication(applications));
     } catch {
       return true;
     }
-  });
+  }));
+}
+
+function normalizeKnownUrlAlias(url) {
+  if (url === "https://github.com/arbor-education/arbor-education/pull/3606") {
+    return "https://github.com/arbor-education/arbor-fe-library/pull/3606";
+  }
+  return url;
+}
+
+function hasNativeMusicApplication(applications) {
+  return applications.some((application) => /^(?:apple music|music|spotify)$/i.test(application.name));
 }
 
 function isGenericVisibleIntent(value) {

@@ -2475,6 +2475,115 @@ test("frame work summary treats ambiguous Arbor Teams sidebars as Slack", () => 
   assert.doesNotMatch(JSON.stringify(frame), /Microsoft Teams|teams\.microsoft\.com|\bTeams\b/);
 });
 
+test("frame work summary treats ambiguous devops channel surfaces as Slack not Discord", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-devops-slack-001-raw-frame",
+    frameId: "obs-cached-devops-slack-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Google Chrome",
+      windowTitle: "GitHub",
+      domain: "github.com"
+    },
+    applications: [
+      {
+        name: "GitHub",
+        windowTitle: "arbor-education/arbor-fe-library",
+        domain: "github.com",
+        isPrimary: true,
+        primaryReason: "The GitHub interface is focused."
+      },
+      {
+        name: "Discord",
+        windowTitle: "devops-branch-testing",
+        domain: "discord.com",
+        isPrimary: false,
+        primaryReason: "Discord window is visible but not the primary focus."
+      }
+    ],
+    visitedUrls: ["https://github.com/arbor-education/arbor-fe-library/pull/3606"],
+    primaryApplication: {
+      name: "GitHub",
+      windowTitle: "arbor-education/arbor-fe-library",
+      domain: "github.com",
+      primaryReason: "The GitHub interface is focused."
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code and communication.",
+    keyTasks: ["Review engineering work and code context"],
+    evidence: [
+      {
+        id: "obs-cached-devops-slack-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A communication app is visible with team collaboration context."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["GitHub", "Slack"]);
+  assert.doesNotMatch(JSON.stringify(frame), /Discord|discord\.com/);
+});
+
+test("frame work summary restores a single primary marker from cached primaryApplication", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-primary-001-raw-frame",
+    frameId: "obs-cached-primary-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Slack",
+      windowTitle: "arbor-education",
+      domain: "arbor-education.slack.com"
+    },
+    applications: [
+      {
+        name: "Slack",
+        windowTitle: "devops-branch-testing",
+        domain: "slack.com",
+        isPrimary: false,
+        primaryReason: "Slack window is visible."
+      },
+      {
+        name: "GitHub",
+        windowTitle: "arbor-education/arbor-fe-library",
+        domain: "github.com",
+        isPrimary: false,
+        primaryReason: "GitHub window is visible."
+      }
+    ],
+    visitedUrls: ["https://arbor-education.slack.com/", "https://github.com/"],
+    primaryApplication: {
+      name: "Slack",
+      windowTitle: "arbor-education",
+      domain: "arbor-education.slack.com",
+      primaryReason: "Slack window is the most prominent and active."
+    },
+    activities: ["team_communication"],
+    visibleIntent: "Reviewing team communication.",
+    keyTasks: ["Draft or review follow-up communication"],
+    evidence: [
+      {
+        id: "obs-cached-primary-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A communication app is visible with team collaboration context."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.isPrimary), [true, false]);
+});
+
 test("frame work summary redacts communication notification window titles", () => {
   const frame = normalizeFrameWorkSummary({
     schemaVersion: "frame-analysis.v1",
@@ -2551,6 +2660,13 @@ test("frame work summary drops known inferred vendor URLs but keeps real visited
         domain: "all-through.sis.local",
         isPrimary: true,
         primaryReason: "The browser is focused."
+      },
+      {
+        name: "Apple Music",
+        windowTitle: "AC/DC",
+        domain: "music.apple.com",
+        isPrimary: false,
+        primaryReason: "Native Music app is visible."
       }
     ],
     visitedUrls: [
@@ -2561,6 +2677,10 @@ test("frame work summary drops known inferred vendor URLs but keeps real visited
       "https://lucille-ui-recorder.com/",
       "https://arbor-education.github.io/",
       "https://jira.com/",
+      "https://chrome.com/",
+      "https://arbor.allscan.net/",
+      "https://music.apple.com/",
+      "https://github.com/arbor-education/arbor-education/pull/3606",
       "https://www.adobe.com/",
       "https://www.apple.com/"
     ],
