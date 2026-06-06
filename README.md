@@ -111,15 +111,26 @@ make analyse DAY=2026-06-01 PROVIDER=ollama MODEL=<model-name> ANALYSE_LIMIT=5
 
 - `storage/analysis/<DAY>/frame-analysis.jsonl`
 - `storage/analysis/<DAY>/activity-timeline.json`
+- `storage/analysis/<DAY>/session-analysis.json`
 - `storage/analysis/<DAY>/work-patterns.json`
 - `storage/analysis/<DAY>/skill-proposals.json`
 - `storage/analysis/<DAY>/task-skill-summary.json`
+- `storage/analysis/<DAY>/memory-update.json`
+- `storage/analysis/<DAY>/optimization-wrap-up.json`
+- `storage/memory/user-memory.json`
+
+The analysis layers are intentionally explicit:
+
+- frame analysis preserves the per-frame view: visible applications, primary/focused window, user intent, key tasks, visited browser URLs with query strings removed, and bounded evidence summaries
+- session analysis rolls a day or selected frame range into timeline sessions with focus app, app counts, visited URLs, command signals, user intent, and context switches
+- local memory updates after each analysis run, accumulating regular tasks, recurring applications, recurring websites, recurring command patterns, workflow improvements, skill recommendations, and reviewed procrastination signals
+- the optimization wrap-up turns the current session plus memory into at least 10 evidence-backed efficiency recommendations, generated skill proposals, software tips, and a cautious procrastination estimate
 
 `make report DAY=<DAY>` reads those structured artifacts and writes a Markdown report to:
 
 - `output/reports/<DAY>.md`
 
-Reports include frame counts, provider/model details, capture surfaces, raw media lifecycle counts, repeated common tasks, work patterns, skill proposals, and privacy notes. They do not include raw screenshots, raw media paths, full URLs with query strings, raw document bodies, or raw message bodies.
+Reports include frame counts, provider/model details, capture surfaces, raw media lifecycle counts, repeated common tasks, session analysis, local memory updates, optimization wrap-up recommendations, work patterns, skill proposals, and privacy notes. They do not include raw screenshots, raw media paths, full URLs with query strings, raw document bodies, or raw message bodies.
 
 `make model-eval DAY=<DAY>` compares candidate OpenAI models against the Lucille weekly efficiency report task using the same redacted structured evidence. It writes:
 
@@ -133,6 +144,8 @@ When day-scoped `storage/captures/<DAY>/observations.jsonl` files exist, analysi
 Analysis also re-applies the excluded app and domain policy before provider selection, so manually written or stale observations from excluded surfaces fail before they can reach Ollama or optional OpenAI synthesis.
 
 The Ollama path calls only a local model service, defaulting to `http://127.0.0.1:11434/api/generate`. It sends local raw media for the matching observation id to that local endpoint and persists only normalized structured `frame-analysis.v1` output. The top-level frame `evidenceId` is the observation raw-frame evidence id, for example `obs-...-raw-frame`, so downstream reports and skill proposals cite screenshot-backed evidence from captured frames. Raw screenshots are not sent to OpenAI by default.
+
+Successful local visual frame analyses are cached under `storage/analysis/<DAY>/frame-cache/<MODEL>/<PROMPT_VERSION>/`. This cache contains only privacy-safe normalized `frame-analysis.v1` output produced from real captured frames by the real local model. It is used to resume long all-frame analyses without reprocessing frames that already succeeded; it is not a mock or fixture fallback.
 
 `OPENAI=1` enables the optional hosted synthesis slice. It requires `OPENAI_API_KEY`, uses the OpenAI Responses API, and sends redacted structured frame/storyboard evidence only. Raw screenshots and raw media paths are not sent by default. The hosted response is normalized back into local `work-patterns.json` and `skill-proposals.json` with evidence IDs, confidence, and proposed-only export plans for Claude, Codex, Cursor, and ChatGPT.
 
@@ -217,4 +230,4 @@ make analyse
 node scripts/summarise-ralf-status.mjs
 ```
 
-`make verify-mmp` validates the repeated-task evidence chain for a day: frame key tasks, activity timeline common tasks, work patterns, skill proposals, task-skill summaries, report sections, and exported skill context. `make operator-smoke` runs the same gate after real capture, local Ollama analysis, report generation, and approved skill export, then records the MMP readiness counts in `logs/ralf/operator-smoke.json`.
+`make verify-mmp` validates the repeated-task evidence chain for a day: frame key tasks, activity timeline common tasks, session analysis, local memory update, 10-item optimization wrap-up, work patterns, skill proposals, task-skill summaries, report sections, and exported skill context. `make operator-smoke` runs the same gate after real capture, local Ollama analysis, report generation, and approved skill export, then records the MMP readiness counts in `logs/ralf/operator-smoke.json`.

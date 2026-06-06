@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildActivityTimeline } from "../src/analysis/activityTimeline.mjs";
+import { buildSessionAnalysis } from "../src/analysis/sessionAnalysis.mjs";
 import { debugFrameAnalysis } from "../src/analysis/debugFrame.mjs";
 import { evaluateOpenAIModels } from "../src/analysis/modelEvaluation.mjs";
 import { runAnalysis } from "../src/analysis/runAnalysis.mjs";
@@ -57,10 +58,13 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
   });
 
   assert.equal(result.frameCount, 3);
+  assert.equal(result.sessionCount, 1);
   assert.equal(result.timelineSegmentCount, 1);
   assert.equal(result.patternCount, 1);
   assert.equal(result.proposalCount, 5);
   assert.equal(result.commonTaskCount, 1);
+  assert.equal(result.memoryRegularTaskCount, 1);
+  assert.equal(result.wrapUpRecommendationCount, 10);
   assert.equal(result.rawMediaLifecycle.action, "retained_by_default");
 
   const analysisDir = path.join(root, "storage", "analysis", "2026-05-30");
@@ -71,7 +75,11 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
   const patterns = JSON.parse(readFileSync(path.join(analysisDir, "work-patterns.json"), "utf8"));
   const proposals = JSON.parse(readFileSync(path.join(analysisDir, "skill-proposals.json"), "utf8"));
   const timeline = JSON.parse(readFileSync(path.join(analysisDir, "activity-timeline.json"), "utf8"));
+  const sessionAnalysis = JSON.parse(readFileSync(path.join(analysisDir, "session-analysis.json"), "utf8"));
   const taskSkillSummary = JSON.parse(readFileSync(path.join(analysisDir, "task-skill-summary.json"), "utf8"));
+  const memoryUpdate = JSON.parse(readFileSync(path.join(analysisDir, "memory-update.json"), "utf8"));
+  const optimizationWrapUp = JSON.parse(readFileSync(path.join(analysisDir, "optimization-wrap-up.json"), "utf8"));
+  const userMemory = JSON.parse(readFileSync(path.join(root, "storage", "memory", "user-memory.json"), "utf8"));
 
   assert.equal(frames[0].schemaVersion, "frame-analysis.v1");
   assert.equal(frames[0].model, "moondream:1.8b");
@@ -105,6 +113,13 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
   assert.equal(timeline.segments[0].dwellTimeSeconds, 360);
   assert.equal(timeline.segments[0].evidenceTrail.length, 3);
   assert.match(timeline.segments[0].cognitiveHurdles.join(" "), /Attendance follow-up|dwell|switch/i);
+  assert.equal(sessionAnalysis.schemaVersion, "session-analysis.v1");
+  assert.equal(sessionAnalysis.sourceFrameCount, 3);
+  assert.equal(sessionAnalysis.sessions.length, 1);
+  assert.equal(sessionAnalysis.sessions[0].frameCount, 3);
+  assert.ok(sessionAnalysis.sessions[0].focusApplication);
+  assert.ok(sessionAnalysis.sessions[0].applications.length >= 1);
+  assert.match(sessionAnalysis.sessions[0].focusSummary, /frame/i);
   assert.equal(taskSkillSummary.schemaVersion, "task-skill-summary.v1");
   assert.equal(taskSkillSummary.commonTasks.length, 1);
   assert.equal(taskSkillSummary.commonTasks[0].evidenceCount, 3);
@@ -127,12 +142,26 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
   assert.ok(proposals.proposals.some((proposal) => proposal.category === "enterprise_rollout"));
   assert.ok(proposals.proposals.some((proposal) => /attendance/i.test(proposal.title)));
   assert.match(proposals.proposals[0].summary, /hurdle|timeline|evidence/i);
+  assert.equal(memoryUpdate.schemaVersion, "memory-update.v1");
+  assert.equal(memoryUpdate.dayProfile.frameCount, 3);
+  assert.equal(memoryUpdate.dayProfile.sessionCount, 1);
+  assert.equal(memoryUpdate.memorySummary.regularTaskCount, 1);
+  assert.equal(userMemory.schemaVersion, "user-memory.v1");
+  assert.equal(userMemory.regularTasks.length, 1);
+  assert.equal(optimizationWrapUp.schemaVersion, "optimization-wrap-up.v1");
+  assert.equal(optimizationWrapUp.efficiencyRecommendations.length, 10);
+  assert.ok(optimizationWrapUp.efficiencyRecommendations.every((recommendation) => recommendation.evidenceIds.length > 0));
+  assert.equal(optimizationWrapUp.procrastinationEstimate.classification, "no_strong_signal");
 
   assert.doesNotThrow(() => assertPrivacySafe(frames, "frames"));
   assert.doesNotThrow(() => assertPrivacySafe(timeline, "timeline"));
+  assert.doesNotThrow(() => assertPrivacySafe(sessionAnalysis, "sessionAnalysis"));
   assert.doesNotThrow(() => assertPrivacySafe(taskSkillSummary, "taskSkillSummary"));
   assert.doesNotThrow(() => assertPrivacySafe(patterns, "patterns"));
   assert.doesNotThrow(() => assertPrivacySafe(proposals, "proposals"));
+  assert.doesNotThrow(() => assertPrivacySafe(memoryUpdate, "memoryUpdate"));
+  assert.doesNotThrow(() => assertPrivacySafe(userMemory, "userMemory"));
+  assert.doesNotThrow(() => assertPrivacySafe(optimizationWrapUp, "optimizationWrapUp"));
 });
 
 test("MMP readiness verifier proves common-task aggregation and skill coverage", async () => {
@@ -155,14 +184,78 @@ test("MMP readiness verifier proves common-task aggregation and skill coverage",
 
   assert.match(output, /MMP readiness: ready/);
   assert.match(output, /Frames: 3/);
+  assert.match(output, /Sessions: 1/);
   assert.match(output, /Common tasks: 1/);
   assert.match(output, /Task-skill summaries: 1/);
   assert.match(output, /Repeated-task frame evidence: 3/);
+  assert.match(output, /Memory regular tasks: 1/);
+  assert.match(output, /Wrap-up recommendations: 10/);
   assert.match(output, /employee_weekly_report/);
   assert.match(output, /workflow_automation/);
   assert.match(output, /ai_assistance/);
   assert.match(output, /manager_monitoring/);
   assert.match(output, /enterprise_rollout/);
+});
+
+test("user memory replaces a rerun day instead of double-counting it", async () => {
+  const root = fixtureRoot();
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b"
+  });
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b"
+  });
+
+  const memory = JSON.parse(readFileSync(path.join(root, "storage", "memory", "user-memory.json"), "utf8"));
+  assert.deepEqual(memory.analysedDays, ["2026-05-30"]);
+  assert.equal(memory.dayProfiles.length, 1);
+  assert.equal(memory.regularTasks[0].observedFrameCount, 3);
+  assert.equal(memory.regularTasks[0].observedSessionCount, 1);
+});
+
+test("runAnalysis resumes from cached real frame analysis without re-calling the provider", async () => {
+  const root = fixtureRoot();
+  let calls = 0;
+  const fetchImpl = async (url, options) => {
+    calls += 1;
+    const observation = parseObservationFromOllamaPrompt(JSON.parse(options.body).prompt);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify(buildLocalVisualTestResponse(observation))
+      })
+    };
+  };
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    fetchImpl
+  });
+  assert.equal(calls, 3);
+
+  const progress = [];
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    onFrameProgress: (event) => progress.push(event.status),
+    fetchImpl: async () => {
+      throw new Error("provider should not be called for cached frames");
+    }
+  });
+
+  assert.deepEqual(progress, ["cached", "cached", "cached"]);
+  const cacheDir = path.join(root, "storage", "analysis", "2026-05-30", "frame-cache");
+  assert.ok(existsSync(cacheDir));
+  const memory = JSON.parse(readFileSync(path.join(root, "storage", "memory", "user-memory.json"), "utf8"));
+  assert.equal(memory.regularTasks[0].observedFrameCount, 3);
 });
 
 test("MMP readiness verifier rejects stale task-skill summaries", async () => {
@@ -255,9 +348,13 @@ test("CLI analyse writes a latest debug analysis JSON bundle", async () => {
     "2026-05-30-mock-frame-003"
   ]);
   assert.equal(debugOutput.artifacts.activityTimeline.schemaVersion, "activity-timeline.v1");
+  assert.equal(debugOutput.artifacts.sessionAnalysis.schemaVersion, "session-analysis.v1");
   assert.equal(debugOutput.artifacts.workPatterns.schemaVersion, "work-patterns.v1");
   assert.equal(debugOutput.artifacts.skillProposals.schemaVersion, "skill-proposals.v1");
   assert.equal(debugOutput.artifacts.taskSkillSummary.schemaVersion, "task-skill-summary.v1");
+  assert.equal(debugOutput.artifacts.memoryUpdate.schemaVersion, "memory-update.v1");
+  assert.equal(debugOutput.artifacts.optimizationWrapUp.schemaVersion, "optimization-wrap-up.v1");
+  assert.equal(debugOutput.artifacts.optimizationWrapUp.efficiencyRecommendations.length, 10);
 });
 
 test("activity timeline groups repeated screenshots into a dwell-bearing segment", () => {
@@ -311,6 +408,34 @@ test("activity timeline groups repeated screenshots into a dwell-bearing segment
     "dev-frame-003-evidence"
   ]);
   assert.match(timeline.segments[0].userIntent, /engineering|review/i);
+});
+
+test("session analysis extracts real commands without treating Git labels as commands", () => {
+  const frames = [
+    syntheticFrame({
+      id: "command-frame-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Terminal",
+      windowTitle: "Lucille tests",
+      visibleIntent: "Inspecting npm test output and Git changes in the sidebar.",
+      evidence: ["Terminal shows npm test running", "Git changes panel is visible"]
+    }),
+    syntheticFrame({
+      id: "command-frame-002",
+      capturedAt: "2026-05-30T09:01:00.000Z",
+      appName: "Terminal",
+      windowTitle: "Lucille tests",
+      visibleIntent: "Reviewing git status before rerunning checks.",
+      evidence: ["Terminal shows git status"]
+    })
+  ];
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+  const sessionAnalysis = buildSessionAnalysis({ day: "2026-05-30", frames, activityTimeline: timeline });
+  const commands = sessionAnalysis.sessions.flatMap((session) => session.commands.map((item) => item.command));
+
+  assert.ok(commands.some((command) => command.startsWith("npm test")));
+  assert.ok(commands.some((command) => command.startsWith("git status")));
+  assert.ok(!commands.some((command) => /Git changes/i.test(command)));
 });
 
 test("activity timeline splits large gaps and stores only redacted visible snippets", () => {
@@ -532,9 +657,14 @@ test("runAnalysis can analyse a bounded observation chunk for local vision testi
     .map((line) => JSON.parse(line));
 
   assert.equal(result.frameCount, 1);
+  assert.equal(result.memoryRegularTaskCount, 0);
   assert.equal(frames.length, 1);
   assert.equal(frames[0].frameId, "2026-05-30-mock-frame-002");
   assert.equal(frames[0].evidenceId, "fixture-evidence-002");
+  const memory = JSON.parse(readFileSync(path.join(root, "storage", "memory", "user-memory.json"), "utf8"));
+  assert.equal(memory.dayProfiles.length, 1);
+  assert.equal(memory.dayProfiles[0].taskSignals.length, 1);
+  assert.equal(memory.regularTasks.length, 0);
 });
 
 test("runAnalysis can analyse selected slide groups for debug analysis", async () => {
@@ -1027,6 +1157,7 @@ test("Ollama provider treats the Arbor data and AI communication window as Slack
     .map((line) => JSON.parse(line))[0];
 
   assert.equal(frame.applications[0].name, "Slack");
+  assert.equal(frame.applications[0].domain, "arbor-data-and-ai.slack.com");
   assert.equal(frame.primaryApplication.name, "Slack");
 });
 
@@ -1074,12 +1205,19 @@ test("Ollama provider extracts browser visited URLs and strips private URL parts
               primaryReason: "Cursor is over the browser content."
             },
             {
-              name: "Safari",
+              name: "Google Chrome",
               windowTitle: "GitHub PR",
-              domain: "https://github.com/org/repo/pull/3606?tab=files",
+              domain: "github.com/org/repo/pull/3606",
               url: "github.com/org/repo/pull/3606",
               isPrimary: false,
               primaryReason: "Secondary browser window is visible."
+            },
+            {
+              name: "Finder",
+              windowTitle: "Downloads",
+              domain: "not a hostname value",
+              isPrimary: false,
+              primaryReason: "Local file browser is visible."
             }
           ],
           primaryApplication: {
@@ -1112,6 +1250,7 @@ test("Ollama provider extracts browser visited URLs and strips private URL parts
     "https://github.com/"
   ]);
   assert.equal(frame.applications[1].domain, "github.com");
+  assert.equal(frame.applications[2].domain, null);
   assert.doesNotMatch(JSON.stringify(frame), /token=|utm_source|notification_referrer_id|#/);
   assert.doesNotThrow(() => assertPrivacySafe(frame, "browserFrame"));
 });

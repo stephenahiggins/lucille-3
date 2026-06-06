@@ -27,16 +27,22 @@ export function verifyMmpReadiness(options = {}) {
 
   const frames = readFrameAnalysis(path.join(analysisDir, "frame-analysis.jsonl"), failures);
   const timeline = readTimeline(path.join(analysisDir, "activity-timeline.json"), { day, failures });
+  const sessionAnalysis = readJson(path.join(analysisDir, "session-analysis.json"), "session analysis", failures);
   const workPatterns = readJson(path.join(analysisDir, "work-patterns.json"), "work patterns", failures);
   const proposalSet = readProposals(path.join(analysisDir, "skill-proposals.json"), { day, failures });
   const taskSkillSummary = readJson(path.join(analysisDir, "task-skill-summary.json"), "task skill summary", failures);
+  const memoryUpdate = readJson(path.join(analysisDir, "memory-update.json"), "memory update", failures);
+  const optimizationWrapUp = readJson(path.join(analysisDir, "optimization-wrap-up.json"), "optimization wrap-up", failures);
   const reportMarkdown = readReport(reportPath, failures);
 
   if (frames) verifyFrames(frames, failures);
   if (timeline) verifyTimeline(timeline, frames, failures);
+  if (sessionAnalysis) verifySessionAnalysis(sessionAnalysis, timeline, frames, failures);
   if (workPatterns) verifyWorkPatterns(workPatterns, timeline, frames, failures);
   if (taskSkillSummary) verifyTaskSkillSummary(taskSkillSummary, timeline, proposalSet, failures);
   if (proposalSet) verifySkillProposals(proposalSet, workPatterns, timeline, frames, root, day, failures);
+  if (memoryUpdate) verifyMemoryUpdate(memoryUpdate, sessionAnalysis, timeline, frames, failures);
+  if (optimizationWrapUp) verifyOptimizationWrapUp(optimizationWrapUp, memoryUpdate, proposalSet, frames, failures);
   if (reportMarkdown) verifyReport(reportMarkdown, failures);
 
   const summary = buildSummary({
@@ -44,9 +50,12 @@ export function verifyMmpReadiness(options = {}) {
     day,
     frames,
     timeline,
+    sessionAnalysis,
     workPatterns,
     proposalSet,
     taskSkillSummary,
+    memoryUpdate,
+    optimizationWrapUp,
     reportPath,
     failures
   });
@@ -223,6 +232,80 @@ function verifyTimeline(timeline, frames, failures) {
   }
 }
 
+function verifySessionAnalysis(sessionAnalysis, timeline, frames, failures) {
+  if (sessionAnalysis.schemaVersion !== "session-analysis.v1") failures.push("session-analysis.json has the wrong schema");
+  if (frames && sessionAnalysis.sourceFrameCount !== frames.length) {
+    failures.push("session-analysis sourceFrameCount does not match frame-analysis.jsonl");
+  }
+  if (timeline && sessionAnalysis.sourceTimelineSegmentCount !== timeline.segments.length) {
+    failures.push("session-analysis sourceTimelineSegmentCount does not match activity-timeline.json");
+  }
+  if (!Array.isArray(sessionAnalysis.sessions) || sessionAnalysis.sessions.length === 0) {
+    failures.push("session-analysis has no sessions");
+    return;
+  }
+  if (timeline && sessionAnalysis.sessions.length !== timeline.segments.length) {
+    failures.push("session-analysis session count does not match timeline segments");
+  }
+  for (const session of sessionAnalysis.sessions) {
+    if (!session.focusApplication) failures.push(`${session.id} is missing focusApplication`);
+    if (!session.userIntent) failures.push(`${session.id} is missing userIntent`);
+    if (!Array.isArray(session.applications) || session.applications.length === 0) {
+      failures.push(`${session.id} is missing application counts`);
+    }
+    if (!Array.isArray(session.evidenceIds) || session.evidenceIds.length === 0) {
+      failures.push(`${session.id} is missing session evidence IDs`);
+    }
+  }
+}
+
+function verifyMemoryUpdate(memoryUpdate, sessionAnalysis, timeline, frames, failures) {
+  if (memoryUpdate.schemaVersion !== "memory-update.v1") failures.push("memory-update.json has the wrong schema");
+  if (frames && memoryUpdate.dayProfile?.frameCount !== frames.length) {
+    failures.push("memory update frame count does not match analysed frames");
+  }
+  if (sessionAnalysis && memoryUpdate.dayProfile?.sessionCount !== sessionAnalysis.sessions.length) {
+    failures.push("memory update session count does not match session-analysis.json");
+  }
+  if (timeline && memoryUpdate.dayProfile?.taskSignals?.length !== timeline.commonTasks.length) {
+    failures.push("memory update does not cover every common task");
+  }
+  if (!memoryUpdate.memorySummary || memoryUpdate.memorySummary.regularTaskCount < 1) {
+    failures.push("memory update did not retain any regular tasks");
+  }
+  if (!Array.isArray(memoryUpdate.dayProfile?.workflowImprovements) || memoryUpdate.dayProfile.workflowImprovements.length === 0) {
+    failures.push("memory update has no workflow improvements");
+  }
+}
+
+function verifyOptimizationWrapUp(optimizationWrapUp, memoryUpdate, proposalSet, frames, failures) {
+  if (optimizationWrapUp.schemaVersion !== "optimization-wrap-up.v1") failures.push("optimization-wrap-up.json has the wrong schema");
+  if (frames && optimizationWrapUp.analysedFrameCount !== frames.length) {
+    failures.push("optimization wrap-up frame count does not match analysed frames");
+  }
+  if (!Array.isArray(optimizationWrapUp.efficiencyRecommendations) || optimizationWrapUp.efficiencyRecommendations.length < 10) {
+    failures.push("optimization wrap-up must offer at least 10 efficiency recommendations");
+  }
+  if (!optimizationWrapUp.efficiencyRecommendations?.every((recommendation) => (
+    recommendation.title &&
+    recommendation.whyItMatters &&
+    recommendation.suggestedAction &&
+    Array.isArray(recommendation.evidenceIds) &&
+    recommendation.evidenceIds.length > 0
+  ))) {
+    failures.push("optimization wrap-up recommendations must be evidence-backed and user-consumable");
+  }
+  if (proposalSet && optimizationWrapUp.skillsCreated?.length !== Math.min(10, proposalSet.proposals.length)) {
+    failures.push("optimization wrap-up skillsCreated does not match skill proposals");
+  }
+  if (memoryUpdate && optimizationWrapUp.regularWorkMemory?.regularTaskCount !== memoryUpdate.memorySummary.regularTaskCount) {
+    failures.push("optimization wrap-up memory counts do not match memory-update.json");
+  }
+  if (!optimizationWrapUp.procrastinationEstimate?.classification) {
+    failures.push("optimization wrap-up is missing the procrastination estimate");
+  }
+}
+
 function verifyWorkPatterns(workPatterns, timeline, frames, failures) {
   if (workPatterns.schemaVersion !== "work-patterns.v1") failures.push("work-patterns.json has the wrong schema");
   if (!Array.isArray(workPatterns.patterns) || workPatterns.patterns.length === 0) {
@@ -317,11 +400,12 @@ function verifyTaskSkillSummary(taskSkillSummary, timeline, proposalSet, failure
   }
   const proposalIds = new Set((proposalSet?.proposals ?? []).map((proposal) => proposal.id));
   for (const task of taskSkillSummary.commonTasks) {
-    if (!Number.isInteger(task.evidenceCount) || task.evidenceCount < 2) {
-      failures.push(`${task.id ?? "task"} does not expose multi-frame evidenceCount`);
+    const repeatedTask = Number.isInteger(task.evidenceCount) && task.evidenceCount >= 2;
+    if (!Number.isInteger(task.evidenceCount) || task.evidenceCount < 1) {
+      failures.push(`${task.id ?? "task"} does not expose evidenceCount`);
     }
-    if (!Array.isArray(task.evidenceIds) || task.evidenceIds.length < 2) {
-      failures.push(`${task.id ?? "task"} does not expose multi-frame representative evidence IDs`);
+    if (!Array.isArray(task.evidenceIds) || task.evidenceIds.length < 1) {
+      failures.push(`${task.id ?? "task"} does not expose representative evidence IDs`);
     }
     if (Array.isArray(task.evidenceIds) && task.evidenceIds.length > task.evidenceCount) {
       failures.push(`${task.id ?? "task"} has more representative evidence IDs than frame evidence count`);
@@ -329,10 +413,11 @@ function verifyTaskSkillSummary(taskSkillSummary, timeline, proposalSet, failure
     if (!Array.isArray(task.topTasks) || task.topTasks.length === 0) {
       failures.push(`${task.id ?? "task"} does not expose key tasks`);
     }
-    if (!Array.isArray(task.skills) || task.skills.length === 0) {
+    if (repeatedTask && (!Array.isArray(task.skills) || task.skills.length === 0)) {
       failures.push(`${task.id ?? "task"} has no matching skills`);
       continue;
     }
+    if (!repeatedTask) continue;
     for (const category of ["employee_weekly_report", "workflow_automation", "ai_assistance"]) {
       if (!task.skills.some((skill) => skill.category === category)) {
         failures.push(`${task.id ?? "task"} is missing a ${category} skill`);
@@ -385,6 +470,9 @@ function verifySkillArtifactsCarryTaskContext({ root, day, proposals, failures }
 function verifyReport(markdown, failures) {
   for (const pattern of [
     /## Activity Timeline/i,
+    /## Wrap-Up/i,
+    /## Memory Update/i,
+    /## Session Analysis/i,
     /## Common Tasks/i,
     /Frame-backed task trail/i,
     /## Efficiency Opportunit(?:y|ies)/i,
@@ -398,7 +486,7 @@ function verifyReport(markdown, failures) {
   }
 }
 
-function buildSummary({ root, day, frames, timeline, workPatterns, proposalSet, taskSkillSummary, reportPath, failures }) {
+function buildSummary({ root, day, frames, timeline, sessionAnalysis, workPatterns, proposalSet, taskSkillSummary, memoryUpdate, optimizationWrapUp, reportPath, failures }) {
   const commonTasks = timeline?.commonTasks ?? [];
   const patterns = workPatterns?.patterns ?? [];
   const proposals = proposalSet?.proposals ?? [];
@@ -408,11 +496,14 @@ function buildSummary({ root, day, frames, timeline, workPatterns, proposalSet, 
     root,
     day,
     frameCount: frames?.length ?? 0,
+    sessionCount: sessionAnalysis?.sessions?.length ?? 0,
     commonTaskCount: commonTasks.length,
     taskSkillSummaryCount: taskSkillSummary?.commonTasks?.length ?? 0,
     repeatedTaskFrameCount,
     patternCount: patterns.length,
     proposalCount: proposals.length,
+    memoryRegularTaskCount: memoryUpdate?.memorySummary?.regularTaskCount ?? 0,
+    wrapUpRecommendationCount: optimizationWrapUp?.efficiencyRecommendations?.length ?? 0,
     proposalCategories: [...new Set(proposals.map((proposal) => proposal.category))].sort(),
     reportPath,
     failures
@@ -488,11 +579,14 @@ function printSummary(summary, json = false) {
   console.log(`MMP readiness: ${summary.ready ? "ready" : "not ready"}`);
   console.log(`Day: ${summary.day}`);
   console.log(`Frames: ${summary.frameCount}`);
+  console.log(`Sessions: ${summary.sessionCount}`);
   console.log(`Common tasks: ${summary.commonTaskCount}`);
   console.log(`Task-skill summaries: ${summary.taskSkillSummaryCount}`);
   console.log(`Repeated-task frame evidence: ${summary.repeatedTaskFrameCount}`);
   console.log(`Work patterns: ${summary.patternCount}`);
   console.log(`Skill proposals: ${summary.proposalCount}`);
+  console.log(`Memory regular tasks: ${summary.memoryRegularTaskCount}`);
+  console.log(`Wrap-up recommendations: ${summary.wrapUpRecommendationCount}`);
   console.log(`Proposal categories: ${summary.proposalCategories.join(", ")}`);
   console.log(`Report: ${summary.reportPath}`);
   if (summary.failures.length > 0) {

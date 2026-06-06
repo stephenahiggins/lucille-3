@@ -72,18 +72,34 @@ export function generateDailyReport(options = {}) {
 
   const frames = readFrameAnalysis(path.join(analysisDir, "frame-analysis.jsonl"), day);
   const activityTimeline = readActivityTimeline(path.join(analysisDir, "activity-timeline.json"), day);
+  const sessionAnalysis = readOptionalJson(path.join(analysisDir, "session-analysis.json"));
   const workPatterns = readWorkPatterns(path.join(analysisDir, "work-patterns.json"), day);
   const proposalSet = readSkillProposals(path.join(analysisDir, "skill-proposals.json"), day);
   const taskSkillSummary = buildTaskSkillSummaryFromArtifacts({ day, activityTimeline, proposalSet });
-  const reportMarkdown = renderReport({ day, frames, activityTimeline, workPatterns, proposalSet, taskSkillSummary });
+  const memoryUpdate = readOptionalJson(path.join(analysisDir, "memory-update.json"));
+  const optimizationWrapUp = readOptionalJson(path.join(analysisDir, "optimization-wrap-up.json"));
+  const reportMarkdown = renderReport({
+    day,
+    frames,
+    activityTimeline,
+    sessionAnalysis,
+    workPatterns,
+    proposalSet,
+    taskSkillSummary,
+    memoryUpdate,
+    optimizationWrapUp
+  });
 
   assertPrivacySafe({
     day,
     frameCount: frames.length,
     activityTimeline,
+    sessionAnalysis,
     workPatterns,
     proposalSet,
     taskSkillSummary,
+    memoryUpdate,
+    optimizationWrapUp,
     reportMarkdown
   }, "dailyReport");
 
@@ -96,12 +112,20 @@ export function generateDailyReport(options = {}) {
     day,
     reportPath: path.relative(root, reportPath),
     frameCount: frames.length,
+    sessionCount: sessionAnalysis?.sessions?.length ?? 0,
     timelineSegmentCount: activityTimeline.segments.length,
     patternCount: workPatterns.patterns.length,
     proposalCount: proposalSet.proposals.length,
     commonTaskCount: taskSkillSummary.commonTasks.length,
     message: `Wrote weekly efficiency report for ${day}.`
   };
+}
+
+function readOptionalJson(filePath) {
+  if (!existsSync(filePath)) return null;
+  const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+  assertPrivacySafe(parsed, path.basename(filePath));
+  return parsed;
 }
 
 function readFrameAnalysis(filePath, day) {
@@ -304,7 +328,7 @@ function validatePattern(value, source) {
   };
 }
 
-function renderReport({ day, frames, activityTimeline, workPatterns, proposalSet, taskSkillSummary }) {
+function renderReport({ day, frames, activityTimeline, sessionAnalysis, workPatterns, proposalSet, taskSkillSummary, memoryUpdate, optimizationWrapUp }) {
   const lifecycle = workPatterns.synthesis.rawMediaLifecycle;
   const totalWeeklyMinutes = workPatterns.patterns.reduce((sum, pattern) => sum + pattern.estimatedMinutesPerWeek, 0);
   const captureSurfaces = frames.map((frame) => {
@@ -390,12 +414,22 @@ ${proposal.implementationSteps.map((step, index) => `${index + 1}. ${step}`).joi
 Prerequisites:
 ${proposal.prerequisites.map((item) => `- ${item}`).join("\n")}`
   )).join("\n\n");
+  const sessionSection = sessionAnalysis
+    ? renderSessionSection(sessionAnalysis)
+    : "Session analysis artifact was not available for this report run.";
+  const wrapUpSection = optimizationWrapUp
+    ? renderWrapUpSection(optimizationWrapUp)
+    : "Optimization wrap-up artifact was not available for this report run.";
+  const memorySection = memoryUpdate
+    ? renderMemorySection(memoryUpdate)
+    : "Memory update artifact was not available for this report run.";
 
   return `# Lucille Weekly Efficiency Report: ${day}
 
 ## Summary
 
 - Frames analysed: ${frames.length}
+- Sessions analysed: ${sessionAnalysis?.sessions?.length ?? activityTimeline.segments.length}
 - Provider: ${workPatterns.provider}
 - Model: ${workPatterns.model}
 - Estimated weekly time saving: ${totalWeeklyMinutes} minutes
@@ -406,6 +440,14 @@ ${proposal.prerequisites.map((item) => `- ${item}`).join("\n")}`
 - Evidence policy: ${workPatterns.synthesis.evidencePolicy}
 
 Lucille identified practical ways this employee could use AI to reduce repeated administrative effort. The recommendations are intended for review and rollout tracking, not hidden monitoring.
+
+## Wrap-Up
+
+${wrapUpSection}
+
+## Memory Update
+
+${memorySection}
 
 ## Capture Surfaces
 
@@ -439,6 +481,10 @@ ${commonTasks}
 
 ${timeline}
 
+## Session Analysis
+
+${sessionSection}
+
 ${patterns}
 
 ## Skills By Repeated Task
@@ -453,6 +499,69 @@ ${proposals}
 
 This report is generated from structured analysis artifacts only. It does not include raw screenshots, raw media paths, keystrokes, clipboard contents, audio, passwords, cookies, authentication tokens, full URLs with query strings, raw document bodies, or raw message bodies.
 `;
+}
+
+function renderWrapUpSection(wrapUp) {
+  return `${wrapUp.headline}
+
+Top efficiency recommendations:
+${wrapUp.efficiencyRecommendations.map((recommendation, index) => (
+  `${index + 1}. ${recommendation.title} (${recommendation.type}, confidence ${recommendation.confidence}, saves ${recommendation.estimatedMinutesPerWeek} min/week)
+   - Why: ${recommendation.whyItMatters}
+   - Action: ${recommendation.suggestedAction}
+   - Evidence: ${recommendation.evidenceIds.join(", ")}`
+)).join("\n")}
+
+Software tips:
+${wrapUp.softwareTips.map((tip) => (
+  `- ${tip.title}: ${tip.tip} Evidence: ${tip.evidenceIds.join(", ")}`
+)).join("\n")}
+
+Procrastination estimate: ${wrapUp.procrastinationEstimate.classification}, ${wrapUp.procrastinationEstimate.estimatedMinutes} minute(s). ${wrapUp.procrastinationEstimate.summary}
+
+Privacy boundary: ${wrapUp.privacySummary}`;
+}
+
+function renderMemorySection(memoryUpdate) {
+  return `Lucille updated its local work memory from this analysis run.
+
+- Analysed days in memory: ${memoryUpdate.memorySummary.analysedDayCount}
+- Regular tasks remembered: ${memoryUpdate.memorySummary.regularTaskCount}
+- Frequent applications remembered: ${memoryUpdate.memorySummary.frequentApplicationCount}
+- Frequent websites remembered: ${memoryUpdate.memorySummary.frequentWebsiteCount}
+- Frequent commands remembered: ${memoryUpdate.memorySummary.frequentCommandCount}
+- Workflow improvements remembered: ${memoryUpdate.memorySummary.workflowImprovementCount}
+- Skill recommendations remembered: ${memoryUpdate.memorySummary.skillRecommendationCount}
+
+Day task signals:
+${memoryUpdate.dayProfile.taskSignals.map((task) => (
+  `- ${task.title}: ${task.observedFrameCount} frame(s), ${task.observedSessionCount} session(s), intent: ${task.lastUserIntent}`
+)).join("\n")}`;
+}
+
+function renderSessionSection(sessionAnalysis) {
+  return `Session artifact: ${sessionAnalysis.schemaVersion}
+
+- Source frames: ${sessionAnalysis.sourceFrameCount}
+- Sessions: ${sessionAnalysis.sessions.length}
+- Total context switches: ${sessionAnalysis.totals.totalContextSwitchCount}
+- Total duration: ${sessionAnalysis.totals.totalDurationSeconds} seconds
+
+${sessionAnalysis.sessions.map((session) => (
+  `### ${session.title}
+
+- Time: ${session.startAt} to ${session.endAt}
+- Focus application: ${session.focusApplication}
+- Duration: ${session.durationSeconds} seconds
+- Frames: ${session.frameCount}
+- Context switches: ${session.contextSwitchCount}
+- Intent: ${session.userIntent}
+- Focus summary: ${session.focusSummary}
+- Applications: ${session.applications.map((item) => `${item.name} (${item.count})`).join(", ")}
+- URLs: ${session.visitedUrls.map((item) => `${item.url} (${item.count})`).join(", ") || "None visible"}
+- Commands: ${session.commands.map((item) => `${item.command} (${item.count})`).join(", ") || "None visible"}
+- Evidence: ${session.evidenceIds.join(", ")}`
+)).join("\n\n")}`;
 }
 
 function rejectUnexpectedFields(value, allowedFields, source) {

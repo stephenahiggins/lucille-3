@@ -153,17 +153,20 @@ function buildScaleSummary({ frames, snapshots, segments, commonTasks }) {
 
 function buildSnapshot(frame, index) {
   requireObject(frame, `frames[${index}]`);
-  const surface = normalizeSurface(frame.surface, `frames[${index}].surface`);
+  const surface = normalizeSurface(preferredFrameSurface(frame), `frames[${index}].surface`);
   const candidates = [
     frame.visibleIntent,
     ...(Array.isArray(frame.activities) ? frame.activities : []),
+    ...(Array.isArray(frame.keyTasks) ? frame.keyTasks : []),
+    ...(Array.isArray(frame.visitedUrls) ? frame.visitedUrls : []),
+    ...(Array.isArray(frame.applications) ? frame.applications.map((application) => `${application?.name ?? ""} ${application?.windowTitle ?? ""} ${application?.domain ?? ""}`) : []),
     ...(Array.isArray(frame.evidence) ? frame.evidence.map((item) => item?.summary) : [])
   ];
   const visibleTextSnippets = unique(candidates
     .map((item) => sanitizeVisibleSnippet(item, 160))
     .filter(Boolean))
     .slice(0, 8);
-  const primaryContextText = `${surface.appName} ${surface.windowTitle} ${surface.domain ?? ""} ${frame.visibleIntent ?? ""} ${(Array.isArray(frame.activities) ? frame.activities : []).join(" ")}`;
+  const primaryContextText = `${surface.appName} ${surface.windowTitle} ${surface.domain ?? ""} ${(Array.isArray(frame.visitedUrls) ? frame.visitedUrls.join(" ") : "")} ${frame.visibleIntent ?? ""} ${(Array.isArray(frame.activities) ? frame.activities : []).join(" ")}`;
   const contextKey = classifyText(primaryContextText);
   const combinedText = `${primaryContextText} ${visibleTextSnippets.join(" ")}`;
   const observedActions = inferObservedActions(combinedText, contextKey);
@@ -186,6 +189,28 @@ function buildSnapshot(frame, index) {
     intentHypotheses,
     problemSignals
   };
+}
+
+function preferredFrameSurface(frame) {
+  const primary = frame.primaryApplication;
+  if (primary?.name && primary.name !== "Unknown") {
+    return {
+      appName: primary.name,
+      windowTitle: primary.windowTitle ?? frame.surface?.windowTitle ?? "Unknown",
+      domain: primary.domain ?? frame.surface?.domain ?? null
+    };
+  }
+  const primaryFromApplications = Array.isArray(frame.applications)
+    ? frame.applications.find((application) => application?.isPrimary && application?.name && application.name !== "Unknown")
+    : null;
+  if (primaryFromApplications) {
+    return {
+      appName: primaryFromApplications.name,
+      windowTitle: primaryFromApplications.windowTitle ?? frame.surface?.windowTitle ?? "Unknown",
+      domain: primaryFromApplications.domain ?? frame.surface?.domain ?? null
+    };
+  }
+  return frame.surface;
 }
 
 function buildSegments(snapshots, day) {

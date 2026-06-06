@@ -1,10 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { resolveLocalModel } from "../config/models.mjs";
 import { assertPrivacySafe, privacyRedactions } from "../privacy/safety.mjs";
 
 const defaultEndpoint = "http://127.0.0.1:11434";
 const imageExtensions = [".png", ".jpg", ".jpeg", ".webp"];
+const maxModelImageDimension = 512;
+const modelRequestTimeoutMs = 120_000;
 
 export class LocalVisualProviderUnavailable extends Error {
   constructor(message) {
@@ -30,16 +34,18 @@ export async function analyseObservationWithOllama(options = {}) {
   const observation = options.observation;
   const evidenceNumber = Number(options.evidenceNumber);
   const mediaPath = resolveLocalRawMediaPath({ root, day, observation });
-  const imageBase64 = readFileSync(mediaPath, "base64");
+  const preparedImage = prepareModelImage(mediaPath);
+  const imageBase64 = readFileSync(preparedImage.path, "base64");
+  preparedImage.cleanup();
   const body = buildOllamaRequest({ model, observation, imageBase64 });
 
   let response;
   try {
-    response = await fetchImpl(`${endpoint}/api/generate`, {
+    response = await fetchWithTimeout(fetchImpl, `${endpoint}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
-    });
+    }, modelRequestTimeoutMs);
   } catch (error) {
     throw new LocalVisualProviderUnavailable(
       `Ollama provider is unavailable at ${endpoint}: ${error.message}`
@@ -83,6 +89,56 @@ export function resolveLocalRawMediaPath({ root, day, observation }) {
 
 export function isLocalVisualProviderUnavailable(error) {
   return error instanceof LocalVisualProviderUnavailable;
+}
+
+async function fetchWithTimeout(fetchImpl, url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function prepareModelImage(mediaPath) {
+  const dimensions = imageDimensions(mediaPath);
+  if (!dimensions || Math.max(dimensions.width, dimensions.height) <= maxModelImageDimension) {
+    return { path: mediaPath, cleanup: () => {} };
+  }
+
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), "lucille-model-frame-"));
+  const outputPath = path.join(tempDir, "frame.png");
+  try {
+    execFileSync("sips", ["-s", "format", "png", "-Z", String(maxModelImageDimension), mediaPath, "--out", outputPath], {
+      stdio: "ignore"
+    });
+    return {
+      path: outputPath,
+      cleanup: () => rmSync(tempDir, { recursive: true, force: true })
+    };
+  } catch {
+    rmSync(tempDir, { recursive: true, force: true });
+    return { path: mediaPath, cleanup: () => {} };
+  }
+}
+
+function imageDimensions(mediaPath) {
+  try {
+    const output = execFileSync("sips", ["-g", "pixelWidth", "-g", "pixelHeight", mediaPath], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const width = Number(/pixelWidth:\s*(\d+)/.exec(output)?.[1]);
+    const height = Number(/pixelHeight:\s*(\d+)/.exec(output)?.[1]);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+    return { width, height };
+  } catch {
+    return null;
+  }
 }
 
 export function buildOllamaPrompt({ observation }) {
@@ -151,6 +207,9 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     parsedPrimaryApplication: parsed.primaryApplication,
     observation
   });
+  const evidenceSummaries = normalizeEvidenceSummariesForApplications(safeSummaries, applications);
+  const frameKeyTasks = normalizeTextArrayForApplications(safeKeyTasks, applications);
+  const riskFlags = normalizeTextArrayForApplications(optionalTextArray(parsed.riskFlags, "riskFlags", 8, 120), applications);
   const primaryApplication = applications.find((application) => application.isPrimary) ?? applications[0];
   const visitedUrls = normalizeVisitedUrls({
     parsedUrls: parsed.visitedUrls ?? parsed.urls ?? parsed.browserUrls,
@@ -182,14 +241,14 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     },
     activities: [requireText(parsed.activity ?? observation.activity, "activity", 80)],
     visibleIntent: requireText(parsed.visibleIntent ?? observation.visibleTextSummary, "visibleIntent", 500),
-    keyTasks: safeKeyTasks,
-    evidence: safeSummaries.map((summary, index) => ({
+    keyTasks: frameKeyTasks,
+    evidence: evidenceSummaries.map((summary, index) => ({
       id: observation.evidenceIds[index] ?? `${observation.id}-local-visual-${String(index + 1).padStart(2, "0")}`,
       kind: "local_visual_summary",
       summary
     })),
     redactions: privacyRedactions(),
-    riskFlags: optionalTextArray(parsed.riskFlags, "riskFlags", 8, 120)
+    riskFlags
   };
 }
 
@@ -200,9 +259,15 @@ function normalizeApplications({ parsedApplications, parsedPrimaryApplication, o
 
   for (const [index, value] of optionalObjectArray(parsedApplications, "applications", 8).entries()) {
     const windowTitle = optionalText(value.windowTitle ?? value.title, `applications[${index}].windowTitle`, 160);
-    const domain = optionalHostname(value.domain, `applications[${index}].domain`);
+    const rawDomain = optionalApplicationHostname(value.domain, `applications[${index}].domain`);
     const rawName = requireText(value.name ?? value.appName ?? value.application, `applications[${index}].name`, 80);
-    const name = canonicalApplicationName({ name: rawName, windowTitle, domain });
+    const name = canonicalApplicationName({ name: rawName, windowTitle, domain: rawDomain });
+    const domain = normalizeApplicationDomain({
+      name,
+      windowTitle,
+      domain: rawDomain
+    });
+    if (name === "Unknown" && applications.length > 0) continue;
     applications.push({
       name,
       windowTitle,
@@ -214,10 +279,11 @@ function normalizeApplications({ parsedApplications, parsedPrimaryApplication, o
   }
 
   if (primaryName) {
+    const primaryDomain = optionalApplicationHostname(parsedPrimaryApplication?.domain, "primaryApplication.domain");
     const canonicalPrimaryName = canonicalApplicationName({
       name: primaryName,
       windowTitle: primaryWindowTitle,
-      domain: optionalHostname(parsedPrimaryApplication?.domain, "primaryApplication.domain")
+      domain: primaryDomain
     });
     const index = applications.findIndex((application) => (
       sameText(application.name, canonicalPrimaryName) &&
@@ -227,7 +293,11 @@ function normalizeApplications({ parsedApplications, parsedPrimaryApplication, o
       applications.unshift({
         name: canonicalPrimaryName,
         windowTitle: primaryWindowTitle,
-        domain: optionalHostname(parsedPrimaryApplication?.domain, "primaryApplication.domain"),
+        domain: normalizeApplicationDomain({
+          name: canonicalPrimaryName,
+          windowTitle: primaryWindowTitle,
+          domain: primaryDomain
+        }),
         isPrimary: true,
         primaryReason: optionalText(parsedPrimaryApplication?.primaryReason ?? parsedPrimaryApplication?.reason, "primaryApplication.primaryReason", 180) ??
           "Model identified this as the primary application."
@@ -253,11 +323,12 @@ function ensureObservationApplication(applications, observation) {
     windowTitle: observation.windowTitle,
     domain: observation.domain
   });
+  if (name === "Unknown" && applications.length > 0) return;
   if (applications.some((application) => sameText(application.name, name))) return;
   applications.push({
     name,
     windowTitle: observation.windowTitle,
-    domain: observation.domain ?? null,
+    domain: normalizeApplicationDomain({ name, windowTitle: observation.windowTitle, domain: observation.domain ?? null }),
     isPrimary: false,
     primaryReason: "Capture metadata named this as the active application."
   });
@@ -299,25 +370,29 @@ function normalizeVisitedUrls({ parsedUrls, parsedApplications, applications, ob
   const urls = [];
 
   for (const [index, value] of optionalUrlItems(parsedUrls, "visitedUrls", 12).entries()) {
-    urls.push(normalizeVisitedUrl(value, `visitedUrls[${index}]`));
+    const url = optionalVisitedUrl(value, `visitedUrls[${index}]`);
+    if (url) urls.push(url);
   }
 
   for (const [index, application] of optionalObjectArray(parsedApplications, "applications", 8).entries()) {
     for (const key of ["visitedUrl", "currentUrl", "pageUrl", "url"]) {
       if (application[key] !== undefined && application[key] !== null && application[key] !== "") {
-        urls.push(normalizeVisitedUrl(application[key], `applications[${index}].${key}`));
+        const url = optionalVisitedUrl(application[key], `applications[${index}].${key}`);
+        if (url) urls.push(url);
       }
     }
   }
 
   for (const application of applications) {
     if (application.domain && isBrowserApplication(application.name)) {
-      urls.push(normalizeVisitedUrl(application.domain, "applications.domain"));
+      const url = optionalVisitedUrl(application.domain, "applications.domain");
+      if (url) urls.push(url);
     }
   }
 
   if (observation.domain && isBrowserApplication(observation.appName)) {
-    urls.push(normalizeVisitedUrl(observation.domain, "observation.domain"));
+    const url = optionalVisitedUrl(observation.domain, "observation.domain");
+    if (url) urls.push(url);
   }
 
   return dedupeText(urls).slice(0, 12);
@@ -356,8 +431,28 @@ function normalizeVisitedUrl(value, location) {
   url.search = "";
   url.hash = "";
   const hostname = optionalHostname(url.hostname, `${location}.hostname`);
+  if (!isPlausibleVisitedHostname(hostname)) {
+    throw new Error(`${location}: URL hostname is not plausible.`);
+  }
   const pathname = normalizeUrlPathname(url.pathname, location);
   return `${url.protocol}//${hostname}${pathname}`;
+}
+
+function optionalVisitedUrl(value, location) {
+  try {
+    return normalizeVisitedUrl(value, location);
+  } catch {
+    return null;
+  }
+}
+
+function isPlausibleVisitedHostname(hostname) {
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".local") ||
+    hostname.includes(".") ||
+    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)
+  );
 }
 
 function normalizeUrlPathname(pathname, location) {
@@ -431,8 +526,55 @@ function canonicalApplicationName({ name, windowTitle = null, domain = null }) {
   return rawName;
 }
 
+function normalizeApplicationDomain({ name, windowTitle = null, domain = null }) {
+  if (!domain) return null;
+  const lowerName = String(name ?? "").toLowerCase();
+  const lowerDomain = String(domain).toLowerCase();
+  const text = `${name ?? ""} ${windowTitle ?? ""} ${domain ?? ""}`.toLowerCase();
+
+  if (name === "Slack") {
+    if (looksLikeKnownSlackWorkspace(text)) return "arbor-data-and-ai.slack.com";
+    return lowerDomain.includes("slack.com") ? lowerDomain : null;
+  }
+  if (name === "Discord") return lowerDomain.includes("discord.com") ? lowerDomain : "discord.com";
+  if (name === "Microsoft Teams") {
+    return lowerDomain.includes("teams.microsoft.com") || lowerDomain.includes("teams.live.com")
+      ? lowerDomain
+      : "teams.microsoft.com";
+  }
+  if (["finder", "terminal", "iterm2", "visual studio code", "cursor"].includes(lowerName)) {
+    return null;
+  }
+  if (isBrowserApplication(name) || ["github", "arbor"].includes(lowerName)) {
+    return lowerDomain === "local" || lowerDomain === "unknown" ? null : lowerDomain;
+  }
+  return lowerDomain === "local" || lowerDomain === "unknown" ? null : lowerDomain;
+}
+
 function looksLikeKnownSlackWorkspace(text) {
-  return /\barbor-data-and-ai\b/.test(text) || /\barbor\b.*\bdata\b.*\bai\b/.test(text);
+  return (
+    /\barbor-data-and-ai\b/.test(text) ||
+    /\barbor\b.*\bdata\b.*\bai\b/.test(text) ||
+    (/\barbor\b/.test(text) && /\bdiscord\.com\b/.test(text))
+  );
+}
+
+function normalizeEvidenceSummariesForApplications(summaries, applications) {
+  return normalizeTextArrayForApplications(summaries, applications);
+}
+
+function normalizeTextArrayForApplications(values, applications) {
+  const hasSlack = applications.some((application) => application.name === "Slack");
+  const hasDiscord = applications.some((application) => application.name === "Discord");
+  if (!hasSlack || hasDiscord) return values;
+  return values.map((summary) => {
+    if (!/\bdiscord\b/i.test(summary)) return summary;
+    return summary
+      .replace(/\bDiscord window\b/gi, "Slack window")
+      .replace(/\bDiscord channel\b/gi, "Slack channel")
+      .replace(/\bDiscord\b/g, "Slack")
+      .replace(/\bdiscord\b/g, "Slack");
+  });
 }
 
 function applicationWindowTitle(value) {
@@ -613,6 +755,14 @@ function optionalHostname(value, location) {
       throw new Error(`${location}: expected a hostname only.`);
     }
     hostname = url.hostname;
+  } else if (hostname.includes("/") && !/\s/.test(hostname)) {
+    let url;
+    try {
+      url = new URL(`https://${hostname}`);
+    } catch {
+      throw new Error(`${location}: expected a hostname only.`);
+    }
+    hostname = url.hostname;
   }
   if (
     hostname.includes("/") ||
@@ -627,6 +777,14 @@ function optionalHostname(value, location) {
     throw new Error(`${location}: contains unsupported hostname characters.`);
   }
   return hostname;
+}
+
+function optionalApplicationHostname(value, location) {
+  try {
+    return optionalHostname(value, location);
+  } catch {
+    return null;
+  }
 }
 
 function coerceTextItem(item) {

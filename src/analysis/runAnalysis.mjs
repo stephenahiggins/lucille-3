@@ -5,8 +5,11 @@ import {
   isLocalVisualProviderUnavailable
 } from "./ollamaProvider.mjs";
 import { buildActivityTimeline } from "./activityTimeline.mjs";
+import { buildSessionAnalysis } from "./sessionAnalysis.mjs";
 import { synthesizeWithOpenAI } from "./openaiSynthesis.mjs";
 import { buildTaskSkillSummaryFromArtifacts } from "./taskSkillSummary.mjs";
+import { updateUserMemory } from "./userMemory.mjs";
+import { buildOptimizationWrapUp } from "./wrapUp.mjs";
 import { validateObservations } from "./observations.mjs";
 import { applyRawMediaLifecycle } from "../capture/rawMediaLifecycle.mjs";
 import { resolveLocalModel, resolveOpenAIModel } from "../config/models.mjs";
@@ -30,8 +33,17 @@ const defaultOptions = {
   deleteRawMedia: false,
   env: process.env,
   fetchImpl: null,
-  root: process.cwd()
+  root: process.cwd(),
+  onFrameProgress: null
 };
+const frameCacheVersion = "frame-analysis-cache.v1";
+const framePromptVersion = "frame-analysis-visual-app-url-memory-512-2026-06-06";
+const legacyFramePromptVersions = [
+  "frame-analysis-visual-app-url-memory-768-2026-06-06",
+  "frame-analysis-visual-app-url-memory-1024-2026-06-06",
+  "frame-analysis-visual-app-url-memory-1536-2026-06-06",
+  "frame-analysis-visual-app-url-memory-2026-06-06"
+];
 
 export async function runAnalysis(options = {}) {
   const config = { ...defaultOptions, ...options };
@@ -89,7 +101,8 @@ export async function runAnalysis(options = {}) {
     model,
     provider,
     fetchImpl: config.fetchImpl,
-    ollamaEndpoint: config.ollamaEndpoint ?? config.env.OLLAMA_HOST
+    ollamaEndpoint: config.ollamaEndpoint ?? config.env.OLLAMA_HOST,
+    onFrameProgress: config.onFrameProgress
   });
   assertPrivacySafe(frameAnalysis, "frameAnalysis");
 
@@ -105,6 +118,12 @@ export async function runAnalysis(options = {}) {
     frames: frameAnalysis
   });
   assertPrivacySafe(activityTimeline, "activityTimeline");
+  const sessionAnalysis = buildSessionAnalysis({
+    day,
+    frames: frameAnalysis,
+    activityTimeline
+  });
+  assertPrivacySafe(sessionAnalysis, "sessionAnalysis");
 
   const localWorkPatterns = buildWorkPatterns(activityTimeline, {
     day,
@@ -152,24 +171,50 @@ export async function runAnalysis(options = {}) {
     proposalSet: skillProposals
   });
   assertPrivacySafe(taskSkillSummary, "taskSkillSummary");
+  const { memory: userMemory, update: memoryUpdate } = updateUserMemory({
+    root: config.root,
+    day,
+    frames: frameAnalysis,
+    sessionAnalysis,
+    activityTimeline,
+    workPatterns,
+    skillProposals
+  });
+  assertPrivacySafe(userMemory, "userMemory");
+  assertPrivacySafe(memoryUpdate, "memoryUpdate");
+  const optimizationWrapUp = buildOptimizationWrapUp({
+    day,
+    frames: frameAnalysis,
+    sessionAnalysis,
+    workPatterns,
+    skillProposals,
+    userMemory
+  });
+  assertPrivacySafe(optimizationWrapUp, "optimizationWrapUp");
 
   writeFileSync(
     path.join(analysisDir, "frame-analysis.jsonl"),
     frameAnalysis.map((frame) => JSON.stringify(frame)).join("\n") + "\n"
   );
   writeJson(path.join(analysisDir, "activity-timeline.json"), activityTimeline);
+  writeJson(path.join(analysisDir, "session-analysis.json"), sessionAnalysis);
   writeJson(path.join(analysisDir, "work-patterns.json"), workPatterns);
   writeJson(path.join(analysisDir, "skill-proposals.json"), skillProposals);
   writeJson(path.join(analysisDir, "task-skill-summary.json"), taskSkillSummary);
+  writeJson(path.join(analysisDir, "memory-update.json"), memoryUpdate);
+  writeJson(path.join(analysisDir, "optimization-wrap-up.json"), optimizationWrapUp);
 
   return {
     day,
     analysisDir,
     frameCount: frameAnalysis.length,
+    sessionCount: sessionAnalysis.sessions.length,
     timelineSegmentCount: activityTimeline.segments.length,
     patternCount: workPatterns.patterns.length,
     proposalCount: skillProposals.proposals.length,
     commonTaskCount: taskSkillSummary.commonTasks.length,
+    memoryRegularTaskCount: userMemory.regularTasks.length,
+    wrapUpRecommendationCount: optimizationWrapUp.efficiencyRecommendations.length,
     provider: localProvider,
     rawMediaLifecycle
   };
@@ -294,12 +339,30 @@ async function buildFrameAnalysis({
   model,
   provider,
   fetchImpl,
-  ollamaEndpoint
+  ollamaEndpoint,
+  onFrameProgress
 }) {
   try {
     const frameAnalysis = [];
     for (const [index, observation] of observations.entries()) {
-      frameAnalysis.push(await analyseObservationWithOllama({
+      const cached = readCachedFrameAnalysis({ root, day, model, observation });
+      if (cached) {
+        reportFrameProgress(onFrameProgress, {
+          index,
+          total: observations.length,
+          observation,
+          status: "cached"
+        });
+        frameAnalysis.push(cached);
+        continue;
+      }
+      reportFrameProgress(onFrameProgress, {
+        index,
+        total: observations.length,
+        observation,
+        status: "analysing"
+      });
+      const frame = await analyseObservationWithOllama({
         root,
         day,
         observation,
@@ -307,7 +370,15 @@ async function buildFrameAnalysis({
         model,
         fetchImpl,
         endpoint: ollamaEndpoint
-      }));
+      });
+      writeCachedFrameAnalysis({ root, day, model, observation, frame });
+      reportFrameProgress(onFrameProgress, {
+        index,
+        total: observations.length,
+        observation,
+        status: "analysed"
+      });
+      frameAnalysis.push(frame);
     }
 
     return {
@@ -328,6 +399,160 @@ async function buildFrameAnalysis({
 
     throw error;
   }
+}
+
+function reportFrameProgress(onFrameProgress, event) {
+  if (typeof onFrameProgress !== "function") return;
+  onFrameProgress({
+    ...event,
+    number: event.index + 1
+  });
+}
+
+function readCachedFrameAnalysis({ root, day, model, observation }) {
+  for (const cachePath of frameCachePaths({ root, day, model, observation })) {
+    if (!existsSync(cachePath)) continue;
+    const cached = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (
+      cached.schemaVersion !== frameCacheVersion ||
+      ![framePromptVersion, ...legacyFramePromptVersions].includes(cached.promptVersion) ||
+      cached.model !== model ||
+      cached.frameId !== observation.id ||
+      cached.frame?.schemaVersion !== "frame-analysis.v1"
+    ) {
+      continue;
+    }
+    assertPrivacySafe(cached, "frameAnalysisCache");
+    return normalizeCachedFrame(cached.frame);
+  }
+  return null;
+}
+
+function writeCachedFrameAnalysis({ root, day, model, observation, frame }) {
+  const cachePath = frameCachePath({ root, day, model, observation });
+  mkdirSync(path.dirname(cachePath), { recursive: true });
+  const cached = {
+    schemaVersion: frameCacheVersion,
+    promptVersion: framePromptVersion,
+    provider: "ollama",
+    model,
+    day,
+    frameId: observation.id,
+    evidenceId: frame.evidenceId,
+    cachedAt: new Date().toISOString(),
+    frame
+  };
+  assertPrivacySafe(cached, "frameAnalysisCache");
+  writeFileSync(cachePath, JSON.stringify(cached, null, 2) + "\n");
+}
+
+function frameCachePath({ root, day, model, observation }) {
+  return frameCachePathForVersion({ root, day, model, observation, promptVersion: framePromptVersion });
+}
+
+function frameCachePaths({ root, day, model, observation }) {
+  return [framePromptVersion, ...legacyFramePromptVersions].map((promptVersion) => (
+    frameCachePathForVersion({ root, day, model, observation, promptVersion })
+  ));
+}
+
+function frameCachePathForVersion({ root, day, model, observation, promptVersion }) {
+  return path.join(
+    root,
+    "storage",
+    "analysis",
+    day,
+    "frame-cache",
+    slugify(model),
+    promptVersion,
+    `${observation.id}.json`
+  );
+}
+
+function normalizeCachedFrame(frame) {
+  const applications = Array.isArray(frame.applications)
+    ? frame.applications.map((application) => {
+      const text = `${application.name ?? ""} ${application.windowTitle ?? ""} ${application.domain ?? ""}`.toLowerCase();
+      if (application.name === "Discord" && /\barbor\b/.test(text)) {
+        return {
+          ...application,
+          name: "Slack",
+          domain: "arbor-data-and-ai.slack.com",
+          primaryReason: replaceDiscordWithSlack(application.primaryReason)
+        };
+      }
+      return {
+        ...application,
+        primaryReason: application.name === "Slack"
+          ? replaceDiscordWithSlack(application.primaryReason)
+          : application.primaryReason
+      };
+    })
+    : [];
+  const hasSlack = applications.some((application) => application.name === "Slack");
+  const hasDiscord = applications.some((application) => application.name === "Discord");
+  const primaryApplication = frame.primaryApplication?.name === "Discord" && /\barbor\b/i.test(`${frame.primaryApplication.windowTitle ?? ""} ${frame.primaryApplication.domain ?? ""}`)
+    ? {
+      ...frame.primaryApplication,
+      name: "Slack",
+      domain: "arbor-data-and-ai.slack.com",
+      primaryReason: replaceDiscordWithSlack(frame.primaryApplication.primaryReason)
+    }
+    : frame.primaryApplication?.name === "Slack"
+      ? {
+        ...frame.primaryApplication,
+        primaryReason: replaceDiscordWithSlack(frame.primaryApplication.primaryReason)
+      }
+      : frame.primaryApplication;
+
+  return {
+    ...frame,
+    applications,
+    primaryApplication,
+    visitedUrls: Array.isArray(frame.visitedUrls)
+      ? frame.visitedUrls.filter(isPlausibleVisitedUrl)
+      : [],
+    keyTasks: hasSlack && !hasDiscord && Array.isArray(frame.keyTasks)
+      ? frame.keyTasks.map(replaceDiscordWithSlack)
+      : frame.keyTasks,
+    evidence: hasSlack && !hasDiscord && Array.isArray(frame.evidence)
+      ? frame.evidence.map((item) => ({
+        ...item,
+        summary: replaceDiscordWithSlack(item.summary)
+      }))
+      : frame.evidence,
+    riskFlags: hasSlack && !hasDiscord && Array.isArray(frame.riskFlags)
+      ? frame.riskFlags.map(replaceDiscordWithSlack)
+      : frame.riskFlags
+  };
+}
+
+function isPlausibleVisitedUrl(value) {
+  try {
+    const url = new URL(value);
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      (
+        url.hostname === "localhost" ||
+        url.hostname.endsWith(".local") ||
+        url.hostname.includes(".") ||
+        /^\d{1,3}(?:\.\d{1,3}){3}$/.test(url.hostname)
+      ) &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function replaceDiscordWithSlack(text) {
+  if (typeof text !== "string") return text;
+  return text
+    .replace(/\bDiscord window\b/gi, "Slack window")
+    .replace(/\bDiscord channel\b/gi, "Slack channel")
+    .replace(/\bDiscord\b/g, "Slack")
+    .replace(/\bdiscord\b/g, "Slack");
 }
 
 function buildWorkPatterns(activityTimeline, context) {
@@ -362,9 +587,11 @@ function buildLocalPatternsFromTimeline(activityTimeline) {
   const tasks = [...activityTimeline.commonTasks].sort((left, right) => (
     taskFrictionScore(right) - taskFrictionScore(left)
   ));
+  const repeatedTasks = tasks.filter((task) => task.frameCount > 1 || task.segmentCount > 1);
+  const candidateTasks = repeatedTasks.length > 0 ? repeatedTasks : tasks;
   const usedIds = new Set();
 
-  return tasks.slice(0, 5).map((task) => {
+  return candidateTasks.slice(0, 5).map((task) => {
     const id = uniquePatternId(task.title, usedIds);
     const signals = unique([
       ...task.cognitiveHurdles,

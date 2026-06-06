@@ -46,12 +46,22 @@ async function main(argv) {
       openai: Boolean(flags.openai),
       openaiModel,
       reasoningEffort: flags.reasoningEffort ?? "high",
-      deleteRawMedia: Boolean(flags.deleteRawMedia)
+      deleteRawMedia: Boolean(flags.deleteRawMedia),
+      onFrameProgress: (event) => {
+        if (event.status === "cached") {
+          console.log(`Frame ${event.number}/${event.total}: ${event.observation.id} from cache`);
+        } else if (event.status === "analysing") {
+          console.log(`Frame ${event.number}/${event.total}: analysing ${event.observation.id}`);
+        } else if (event.status === "analysed") {
+          console.log(`Frame ${event.number}/${event.total}: cached ${event.observation.id}`);
+        }
+      }
     });
 
     console.log(`Analysed ${result.frameCount} frame observation(s) for ${result.day}.`);
     console.log(`Local provider: ${result.provider}. Model: ${model}.`);
-    console.log(`Timeline segments: ${result.timelineSegmentCount}. Patterns: ${result.patternCount}. Skill proposals: ${result.proposalCount}.`);
+    console.log(`Sessions: ${result.sessionCount}. Timeline segments: ${result.timelineSegmentCount}. Patterns: ${result.patternCount}. Skill proposals: ${result.proposalCount}.`);
+    console.log(`Memory tasks: ${result.memoryRegularTaskCount}. Wrap-up recommendations: ${result.wrapUpRecommendationCount}.`);
     console.log(`Wrote ${path.relative(process.cwd(), result.analysisDir)}`);
     if (flags.debugOutput) {
       writeDebugJson(flags.debugOutput, buildDebugAnalysisOutput(result));
@@ -266,9 +276,12 @@ function buildDebugAnalysisOutput(result) {
     artifacts: {
       frameAnalysis: readJsonl(path.join(analysisDir, "frame-analysis.jsonl")),
       activityTimeline: readJson(path.join(analysisDir, "activity-timeline.json")),
+      sessionAnalysis: readJson(path.join(analysisDir, "session-analysis.json")),
       workPatterns: readJson(path.join(analysisDir, "work-patterns.json")),
       skillProposals: readJson(path.join(analysisDir, "skill-proposals.json")),
-      taskSkillSummary: readJson(path.join(analysisDir, "task-skill-summary.json"))
+      taskSkillSummary: readJson(path.join(analysisDir, "task-skill-summary.json")),
+      memoryUpdate: readJson(path.join(analysisDir, "memory-update.json")),
+      optimizationWrapUp: readJson(path.join(analysisDir, "optimization-wrap-up.json"))
     }
   };
 }
