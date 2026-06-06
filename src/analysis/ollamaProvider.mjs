@@ -36,47 +36,54 @@ export async function analyseObservationWithOllama(options = {}) {
   const evidenceNumber = Number(options.evidenceNumber);
   const mediaPath = resolveLocalRawMediaPath({ root, day, observation });
 
-  let response;
-  let lastRequestError = null;
+  let parsed = null;
+  let lastError = null;
   for (const [index, maxDimension] of modelImageDimensions.entries()) {
     const preparedImage = prepareModelImage(mediaPath, maxDimension);
     const imageBase64 = readFileSync(preparedImage.path, "base64");
     preparedImage.cleanup();
     const body = buildOllamaRequest({ model, observation, imageBase64, maxDimension });
 
+    let response;
     try {
       response = await fetchWithTimeout(fetchImpl, `${endpoint}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       }, modelRequestTimeoutMs);
-      lastRequestError = null;
-      break;
     } catch (error) {
-      lastRequestError = error;
+      lastError = error;
       if (!isAbortLikeError(error) || index === modelImageDimensions.length - 1) {
         throw new LocalVisualProviderUnavailable(
           `Ollama provider is unavailable at ${endpoint}: ${error.message}`
         );
       }
+      continue;
+    }
+
+    if (!response?.ok) {
+      const status = response?.status ?? "unknown";
+      throw new LocalVisualProviderUnavailable(
+        `Ollama provider request failed with status ${status} for model ${model}.`
+      );
+    }
+
+    const payload = await response.json();
+    try {
+      parsed = parseOllamaResponse(payload);
+      break;
+    } catch (error) {
+      lastError = error;
+      if (index === modelImageDimensions.length - 1) throw error;
     }
   }
 
-  if (lastRequestError) {
-    throw new LocalVisualProviderUnavailable(
-      `Ollama provider is unavailable at ${endpoint}: ${lastRequestError.message}`
+  if (!parsed) {
+    throw lastError ?? new LocalVisualProviderUnavailable(
+      `Ollama provider did not return a usable frame analysis from ${endpoint}.`
     );
   }
 
-  if (!response?.ok) {
-    const status = response?.status ?? "unknown";
-    throw new LocalVisualProviderUnavailable(
-      `Ollama provider request failed with status ${status} for model ${model}.`
-    );
-  }
-
-  const payload = await response.json();
-  const parsed = parseOllamaResponse(payload);
   const frame = normalizeOllamaFrame({
     parsed,
     observation,

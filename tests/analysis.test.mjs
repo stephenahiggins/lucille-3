@@ -1270,6 +1270,76 @@ test("Ollama provider retries a timed-out local image request at fallback size",
   assert.match(attempts[1], /1024px/);
 });
 
+test("Ollama provider retries malformed local model JSON at fallback size", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-json-retry-001.png"), "local malformed json retry image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-json-retry-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Google Chrome",
+      windowTitle: "Google Search",
+      domain: "google.com",
+      activity: "browser_research",
+      visibleTextSummary: "A visible browser search page was captured for local analysis.",
+      redactedSignals: ["browser search results visible"],
+      evidenceIds: ["obs-json-retry-001-raw-frame"]
+    }) + "\n"
+  );
+
+  const attempts = [];
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      attempts.push(body.prompt);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: attempts.length === 1
+            ? "{\"activity\":\"browser_research\","
+            : JSON.stringify({
+              activity: "browser_research",
+              visibleIntent: "Reviewing browser search results.",
+              applications: [
+                {
+                  name: "Google Chrome",
+                  windowTitle: "Google Search",
+                  domain: "google.com",
+                  isPrimary: true,
+                  primaryReason: "The browser is the focused window."
+                }
+              ],
+              primaryApplication: {
+                name: "Google Chrome",
+                windowTitle: "Google Search",
+                domain: "google.com",
+                primaryReason: "The browser is the focused window."
+              },
+              visitedUrls: ["https://google.com/search"],
+              keyTasks: ["Search for information"],
+              evidenceSummaries: ["Google search results are visible."],
+              riskFlags: []
+            })
+        })
+      };
+    }
+  });
+
+  assert.equal(attempts.length, 2);
+  assert.match(attempts[0], /1536px/);
+  assert.match(attempts[1], /1024px/);
+});
+
 test("Ollama provider differentiates Discord Slack and Microsoft Teams applications", async () => {
   const root = fixtureRoot();
   const captureDir = path.join(root, "storage", "captures", "2026-05-30");
