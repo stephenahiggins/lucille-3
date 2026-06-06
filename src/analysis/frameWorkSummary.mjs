@@ -94,12 +94,15 @@ function normalizeApplicationNameAlias(name) {
 
 function normalizeCommunicationAliases(applications) {
   const hasPrimarySlack = applications.some((application) => application.name === "Slack" && application.isPrimary);
-  return applications.map((application) => {
+  return applications.flatMap((application) => {
     if (application.name === "Slack") {
       return {
         ...application,
         primaryReason: normalizeCommunicationReason(application.primaryReason)
       };
+    }
+    if (application.name === "Microsoft Teams" && !hasSpecificTeamsSurface(application) && looksLikeBrowserShortcutHallucination(application)) {
+      return [];
     }
     if (
       (application.name === "Discord" && !hasSpecificDiscordSurface(application) && looksLikeSlackSurface(application)) ||
@@ -189,7 +192,12 @@ function normalizeCalendarTeamsHallucinations({ applications, visitedUrls }) {
 function hasSpecificTeamsSurface(application) {
   const text = `${application.windowTitle ?? ""} ${application.domain ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
   return /\bteams\.microsoft\.com\b/.test(text) &&
-    /\b(?:chat|calls|tenant|team list|teams work|teams meeting)\b/.test(text);
+    /\b(?:calls|tenant|team list|teams work|teams meeting|teams chat|teams channel)\b/.test(text);
+}
+
+function looksLikeBrowserShortcutHallucination(application) {
+  const text = `${application.windowTitle ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
+  return /\bsidebar label\b/.test(text) || /\bteam ada board\b/.test(text);
 }
 
 function normalizeBrowserSurfaceApplications(applications) {

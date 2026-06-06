@@ -2678,6 +2678,61 @@ test("frame work summary drops secondary Teams hallucinations when Slack is prim
   assert.doesNotMatch(JSON.stringify(frame), /Microsoft Teams|teams\.microsoft\.com|\bTeams\b/);
 });
 
+test("frame work summary drops Teams labels inferred from browser shortcuts", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-browser-shortcut-001-raw-frame",
+    frameId: "obs-cached-browser-shortcut-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Google Chrome",
+      windowTitle: "Google",
+      domain: "google.com"
+    },
+    applications: [
+      {
+        name: "Google Chrome",
+        windowTitle: "Google",
+        domain: "google.com",
+        isPrimary: true,
+        primaryReason: "Foreground browser window."
+      },
+      {
+        name: "Microsoft Teams",
+        windowTitle: "Team ADA Board",
+        domain: "teams.microsoft.com",
+        isPrimary: false,
+        primaryReason: "Sidebar label."
+      }
+    ],
+    visitedUrls: ["https://google.com/"],
+    primaryApplication: {
+      name: "Google Chrome",
+      windowTitle: "Google",
+      domain: "google.com",
+      primaryReason: "Foreground browser window."
+    },
+    activities: ["browser_work"],
+    visibleIntent: "Reviewing a browser page.",
+    keyTasks: ["Search for information"],
+    evidence: [
+      {
+        id: "obs-cached-browser-shortcut-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A browser start page is visible."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Google Chrome"]);
+  assert.doesNotMatch(JSON.stringify(frame), /Microsoft Teams|teams\.microsoft\.com|\bTeams\b/);
+});
+
 test("frame work summary treats ambiguous devops channel surfaces as Slack not Discord", () => {
   const frame = normalizeFrameWorkSummary({
     schemaVersion: "frame-analysis.v1",
