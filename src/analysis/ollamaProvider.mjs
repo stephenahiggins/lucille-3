@@ -85,28 +85,38 @@ export function isLocalVisualProviderUnavailable(error) {
   return error instanceof LocalVisualProviderUnavailable;
 }
 
-function buildOllamaRequest({ model, observation, imageBase64 }) {
+export function buildOllamaPrompt({ observation }) {
+  return [
+    "Analyze this locally supplied visible screen frame for Lucille 3.",
+    "Return JSON only with keys: activity, visibleIntent, applications, primaryApplication, visitedUrls, keyTasks, evidenceSummaries, riskFlags.",
+    "applications must be an array of every visible or inferable running application/work surface in the frame. Each item should include name, windowTitle when visible, domain when visible as a hostname only, isPrimary, and primaryReason.",
+    "Whenever a web browser window or browser-based app is visible, OCR the address bar and include visitedUrls as an array of visible visited URLs. Preserve hostnames and visible paths, but remove query strings, fragments, usernames, passwords, tokens, cookies, and tracking parameters. If only the hostname is visible, include the hostname as an https URL.",
+    "Differentiate communication apps precisely: Discord, Slack, and Microsoft Teams are separate applications. Use visible branding, domains, sidebar labels, and window titles; do not call Discord Slack or Teams, do not call Slack Discord or Teams, and use Microsoft Teams for Teams work/chat windows.",
+    "Slack visual cues include a purple workspace sidebar, workspace switcher, channel names prefixed with #, and left rail labels like Home, DMs, Activity, Later, More. If those Slack cues are visible, label the app Slack even when the channel or workspace name resembles a community/server name.",
+    "Discord visual cues include server icons, Discord server/channel layout, voice channel controls, and Discord branding; do not infer Discord from a #channel name alone. Microsoft Teams visual cues include Teams/Chat/Calendar/Calls navigation, tenant/team lists, and teams.microsoft.com.",
+    "Use the mouse cursor position to decide primaryApplication when the cursor is visible. The primary application is the application currently in use: the app/window under or nearest the cursor, or the focused active window if the cursor is not visible. Say when the cursor is not visible instead of inventing cursor evidence.",
+    "keyTasks must be 1-6 short task labels that describe what work the user is visibly doing, such as reviewing a report, reconciling evidence, drafting follow-up, troubleshooting command output, or reviewing code.",
+    "Use concise redacted summaries that name visible applications, pages, documents, UI state, console output categories, and short bounded visible text snippets.",
+    "Prefer evidence summaries that explain the user's likely action, visible intent, unresolved errors, repeated attempts, or review burden.",
+    "Do not invent workflows that are not visible. Do not rely on import metadata as visual evidence.",
+    "Do not transcribe raw document bodies, raw message bodies, passwords, tokens, cookies, full URLs, clipboard contents, keystrokes, or audio.",
+    `Existing safe observation metadata: ${JSON.stringify({
+      appName: observation.appName,
+      windowTitle: observation.windowTitle,
+      domain: observation.domain,
+      activity: observation.activity,
+      visibleTextSummary: observation.visibleTextSummary,
+      redactedSignals: observation.redactedSignals
+    })}`
+  ].join(" ");
+}
+
+export function buildOllamaRequest({ model, observation, imageBase64 }) {
   return {
     model,
     stream: false,
     format: "json",
-    prompt: [
-      "Analyze this locally supplied visible screen frame for Lucille 3.",
-      "Return JSON only with keys: activity, visibleIntent, keyTasks, evidenceSummaries, riskFlags.",
-      "keyTasks must be 1-6 short task labels that describe what work the user is visibly doing, such as reviewing a report, reconciling evidence, drafting follow-up, troubleshooting command output, or reviewing code.",
-      "Use concise redacted summaries that name visible applications, pages, documents, UI state, console output categories, and short bounded visible text snippets.",
-      "Prefer evidence summaries that explain the user's likely action, visible intent, unresolved errors, repeated attempts, or review burden.",
-      "Do not invent workflows that are not visible. Do not rely on import metadata as visual evidence.",
-      "Do not transcribe raw document bodies, raw message bodies, passwords, tokens, cookies, full URLs, clipboard contents, keystrokes, or audio.",
-      `Existing safe observation metadata: ${JSON.stringify({
-        appName: observation.appName,
-        windowTitle: observation.windowTitle,
-        domain: observation.domain,
-        activity: observation.activity,
-        visibleTextSummary: observation.visibleTextSummary,
-        redactedSignals: observation.redactedSignals
-      })}`
-    ].join(" "),
+    prompt: buildOllamaPrompt({ observation }),
     images: [imageBase64]
   };
 }
@@ -136,6 +146,18 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     ...safeSummaries
   ].join(" ");
   const safeKeyTasks = normalizeFrameKeyTasks(keyTasks, taskContext);
+  const applications = normalizeApplications({
+    parsedApplications: parsed.applications ?? parsed.visibleApplications,
+    parsedPrimaryApplication: parsed.primaryApplication,
+    observation
+  });
+  const primaryApplication = applications.find((application) => application.isPrimary) ?? applications[0];
+  const visitedUrls = normalizeVisitedUrls({
+    parsedUrls: parsed.visitedUrls ?? parsed.urls ?? parsed.browserUrls,
+    parsedApplications: parsed.applications ?? parsed.visibleApplications,
+    applications,
+    observation
+  });
 
   return {
     schemaVersion: "frame-analysis.v1",
@@ -150,6 +172,14 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
       windowTitle: observation.windowTitle,
       domain: observation.domain ?? null
     },
+    applications,
+    visitedUrls,
+    primaryApplication: {
+      name: primaryApplication.name,
+      windowTitle: primaryApplication.windowTitle,
+      domain: primaryApplication.domain,
+      primaryReason: primaryApplication.primaryReason
+    },
     activities: [requireText(parsed.activity ?? observation.activity, "activity", 80)],
     visibleIntent: requireText(parsed.visibleIntent ?? observation.visibleTextSummary, "visibleIntent", 500),
     keyTasks: safeKeyTasks,
@@ -161,6 +191,257 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     redactions: privacyRedactions(),
     riskFlags: optionalTextArray(parsed.riskFlags, "riskFlags", 8, 120)
   };
+}
+
+function normalizeApplications({ parsedApplications, parsedPrimaryApplication, observation }) {
+  const applications = [];
+  const primaryName = applicationName(parsedPrimaryApplication);
+  const primaryWindowTitle = applicationWindowTitle(parsedPrimaryApplication);
+
+  for (const [index, value] of optionalObjectArray(parsedApplications, "applications", 8).entries()) {
+    const windowTitle = optionalText(value.windowTitle ?? value.title, `applications[${index}].windowTitle`, 160);
+    const domain = optionalHostname(value.domain, `applications[${index}].domain`);
+    const rawName = requireText(value.name ?? value.appName ?? value.application, `applications[${index}].name`, 80);
+    const name = canonicalApplicationName({ name: rawName, windowTitle, domain });
+    applications.push({
+      name,
+      windowTitle,
+      domain,
+      isPrimary: Boolean(value.isPrimary),
+      primaryReason: optionalText(value.primaryReason ?? value.reason, `applications[${index}].primaryReason`, 180) ??
+        "Visible application in the captured frame."
+    });
+  }
+
+  if (primaryName) {
+    const canonicalPrimaryName = canonicalApplicationName({
+      name: primaryName,
+      windowTitle: primaryWindowTitle,
+      domain: optionalHostname(parsedPrimaryApplication?.domain, "primaryApplication.domain")
+    });
+    const index = applications.findIndex((application) => (
+      sameText(application.name, canonicalPrimaryName) &&
+      (!primaryWindowTitle || sameText(application.windowTitle, primaryWindowTitle))
+    ));
+    if (index === -1) {
+      applications.unshift({
+        name: canonicalPrimaryName,
+        windowTitle: primaryWindowTitle,
+        domain: optionalHostname(parsedPrimaryApplication?.domain, "primaryApplication.domain"),
+        isPrimary: true,
+        primaryReason: optionalText(parsedPrimaryApplication?.primaryReason ?? parsedPrimaryApplication?.reason, "primaryApplication.primaryReason", 180) ??
+          "Model identified this as the primary application."
+      });
+    } else {
+      applications[index] = {
+        ...applications[index],
+        isPrimary: true,
+        primaryReason: optionalText(parsedPrimaryApplication?.primaryReason ?? parsedPrimaryApplication?.reason, "primaryApplication.primaryReason", 180) ??
+          applications[index].primaryReason
+      };
+    }
+  }
+
+  ensureObservationApplication(applications, observation);
+  ensureSinglePrimary(applications, observation);
+  return dedupeApplications(applications).slice(0, 8);
+}
+
+function ensureObservationApplication(applications, observation) {
+  const name = canonicalApplicationName({
+    name: observation.appName,
+    windowTitle: observation.windowTitle,
+    domain: observation.domain
+  });
+  if (applications.some((application) => sameText(application.name, name))) return;
+  applications.push({
+    name,
+    windowTitle: observation.windowTitle,
+    domain: observation.domain ?? null,
+    isPrimary: false,
+    primaryReason: "Capture metadata named this as the active application."
+  });
+}
+
+function ensureSinglePrimary(applications, observation) {
+  let primaryIndex = applications.findIndex((application) => application.isPrimary);
+  if (primaryIndex === -1) {
+    const observationAppName = canonicalApplicationName({
+      name: observation.appName,
+      windowTitle: observation.windowTitle,
+      domain: observation.domain
+    });
+    primaryIndex = applications.findIndex((application) => sameText(application.name, observationAppName));
+  }
+  if (primaryIndex === -1) primaryIndex = 0;
+
+  for (const [index, application] of applications.entries()) {
+    application.isPrimary = index === primaryIndex;
+    if (application.isPrimary && !application.primaryReason) {
+      application.primaryReason = "Cursor position was not visible; using focused active window metadata.";
+    }
+  }
+}
+
+function dedupeApplications(applications) {
+  const seen = new Set();
+  const deduped = [];
+  for (const application of applications) {
+    const key = `${application.name.toLowerCase()}|${application.windowTitle?.toLowerCase() ?? ""}|${application.domain ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(application);
+  }
+  return deduped;
+}
+
+function normalizeVisitedUrls({ parsedUrls, parsedApplications, applications, observation }) {
+  const urls = [];
+
+  for (const [index, value] of optionalUrlItems(parsedUrls, "visitedUrls", 12).entries()) {
+    urls.push(normalizeVisitedUrl(value, `visitedUrls[${index}]`));
+  }
+
+  for (const [index, application] of optionalObjectArray(parsedApplications, "applications", 8).entries()) {
+    for (const key of ["visitedUrl", "currentUrl", "pageUrl", "url"]) {
+      if (application[key] !== undefined && application[key] !== null && application[key] !== "") {
+        urls.push(normalizeVisitedUrl(application[key], `applications[${index}].${key}`));
+      }
+    }
+  }
+
+  for (const application of applications) {
+    if (application.domain && isBrowserApplication(application.name)) {
+      urls.push(normalizeVisitedUrl(application.domain, "applications.domain"));
+    }
+  }
+
+  if (observation.domain && isBrowserApplication(observation.appName)) {
+    urls.push(normalizeVisitedUrl(observation.domain, "observation.domain"));
+  }
+
+  return dedupeText(urls).slice(0, 12);
+}
+
+function optionalUrlItems(value, location, maxItems) {
+  if (value === undefined || value === null) return [];
+  if (typeof value === "string") return [value];
+  if (!Array.isArray(value)) {
+    throw new Error(`${location}: expected an array.`);
+  }
+  return value.slice(0, maxItems).map((item) => {
+    if (typeof item === "string") return item;
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    return item.url ?? item.href ?? item.visitedUrl ?? item.currentUrl ?? item.pageUrl ?? item.domain ?? item.hostname ?? item.host ?? item;
+  });
+}
+
+function normalizeVisitedUrl(value, location) {
+  const rawValue = requireText(value, location, 500);
+  const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawValue)
+    ? rawValue
+    : `https://${rawValue}`;
+  let url;
+  try {
+    url = new URL(withProtocol);
+  } catch {
+    throw new Error(`${location}: expected a browser URL or hostname.`);
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error(`${location}: expected an HTTP(S) browser URL.`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${location}: browser URLs must not include credentials.`);
+  }
+  url.search = "";
+  url.hash = "";
+  const hostname = optionalHostname(url.hostname, `${location}.hostname`);
+  const pathname = normalizeUrlPathname(url.pathname, location);
+  return `${url.protocol}//${hostname}${pathname}`;
+}
+
+function normalizeUrlPathname(pathname, location) {
+  if (!pathname || pathname === "/") return "/";
+  const decoded = pathname.replace(/\/{2,}/g, "/");
+  if (/[\s"'<>]/.test(decoded)) {
+    throw new Error(`${location}: URL path contains unsupported characters.`);
+  }
+  return decoded;
+}
+
+function isBrowserApplication(name) {
+  return /\b(browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium)\b/i.test(String(name ?? ""));
+}
+
+function dedupeText(values) {
+  const seen = new Set();
+  const deduped = [];
+  for (const value of values) {
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(value);
+  }
+  return deduped;
+}
+
+function applicationName(value) {
+  if (typeof value === "string") return value.trim() || null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return optionalText(value.name ?? value.appName ?? value.application, "primaryApplication.name", 80);
+}
+
+function canonicalApplicationName({ name, windowTitle = null, domain = null }) {
+  const rawName = requireText(name, "application.name", 80);
+  const text = `${rawName} ${windowTitle ?? ""} ${domain ?? ""}`.toLowerCase();
+  const normalizedDomain = String(domain ?? "").toLowerCase();
+
+  if (looksLikeKnownSlackWorkspace(text)) {
+    return "Slack";
+  }
+
+  if (
+    normalizedDomain === "discord.com" ||
+    normalizedDomain.endsWith(".discord.com") ||
+    /\bdiscord\b/.test(text)
+  ) {
+    return "Discord";
+  }
+
+  if (
+    normalizedDomain === "slack.com" ||
+    normalizedDomain.endsWith(".slack.com") ||
+    /\bslack\b/.test(text)
+  ) {
+    return "Slack";
+  }
+
+  if (
+    normalizedDomain === "teams.microsoft.com" ||
+    normalizedDomain.endsWith(".teams.microsoft.com") ||
+    normalizedDomain === "teams.live.com" ||
+    normalizedDomain.endsWith(".teams.live.com") ||
+    /\bmicrosoft teams\b/.test(text) ||
+    /\bms teams\b/.test(text) ||
+    /\bteams\b/.test(rawName.toLowerCase())
+  ) {
+    return "Microsoft Teams";
+  }
+
+  return rawName;
+}
+
+function looksLikeKnownSlackWorkspace(text) {
+  return /\barbor-data-and-ai\b/.test(text) || /\barbor\b.*\bdata\b.*\bai\b/.test(text);
+}
+
+function applicationWindowTitle(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return optionalText(value.windowTitle ?? value.title, "primaryApplication.windowTitle", 160);
+}
+
+function sameText(left, right) {
+  return String(left ?? "").trim().toLowerCase() === String(right ?? "").trim().toLowerCase();
 }
 
 function inferFrameKeyTasks(text) {
@@ -301,6 +582,51 @@ function optionalTextArray(value, location, maxItems, maxLength) {
   return value
     .slice(0, maxItems)
     .map((item, index) => requireTextWithinLimit(coerceTextItem(item), `${location}[${index}]`, maxLength));
+}
+
+function optionalObjectArray(value, location, maxItems) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`${location}: expected an array.`);
+  }
+  return value.slice(0, maxItems).map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${location}[${index}]: expected an object.`);
+    }
+    return item;
+  });
+}
+
+function optionalText(value, location, maxLength) {
+  if (value === undefined || value === null || value === "") return null;
+  return requireText(value, location, maxLength);
+}
+
+function optionalHostname(value, location) {
+  if (value === undefined || value === null || value === "") return null;
+  let hostname = requireText(value, location, 500).toLowerCase();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(hostname)) {
+    let url;
+    try {
+      url = new URL(hostname);
+    } catch {
+      throw new Error(`${location}: expected a hostname only.`);
+    }
+    hostname = url.hostname;
+  }
+  if (
+    hostname.includes("/") ||
+    hostname.includes("?") ||
+    hostname.includes("#") ||
+    hostname.includes("@") ||
+    /\s/.test(hostname)
+  ) {
+    throw new Error(`${location}: expected a hostname only.`);
+  }
+  if (!/^[a-z0-9.-]+(?::[0-9]{1,5})?$/.test(hostname)) {
+    throw new Error(`${location}: contains unsupported hostname characters.`);
+  }
+  return hostname;
 }
 
 function coerceTextItem(item) {

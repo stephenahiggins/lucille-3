@@ -14,6 +14,9 @@ const frameFields = new Set([
   "provider",
   "model",
   "surface",
+  "applications",
+  "visitedUrls",
+  "primaryApplication",
   "activities",
   "visibleIntent",
   "keyTasks",
@@ -22,6 +25,8 @@ const frameFields = new Set([
   "riskFlags"
 ]);
 const surfaceFields = new Set(["appName", "windowTitle", "domain"]);
+const applicationFields = new Set(["name", "windowTitle", "domain", "isPrimary", "primaryReason"]);
+const primaryApplicationFields = new Set(["name", "windowTitle", "domain", "primaryReason"]);
 const evidenceFields = new Set(["id", "kind", "summary"]);
 const workPatternSetFields = new Set(["schemaVersion", "day", "provider", "model", "synthesis", "patterns"]);
 const synthesisFields = new Set([
@@ -166,6 +171,11 @@ function validateFrame(value, { day, source }) {
     provider: requireText(value.provider, `${source}.provider`, 80),
     model: requireText(value.model, `${source}.model`, 120),
     surface: validateSurface(value.surface, `${source}.surface`),
+    applications: requireArray(value.applications, `${source}.applications`).map((application, index) => (
+      validateApplication(application, `${source}.applications[${index}]`)
+    )),
+    visitedUrls: requireTextArray(value.visitedUrls, `${source}.visitedUrls`, 12, 500),
+    primaryApplication: validatePrimaryApplication(value.primaryApplication, `${source}.primaryApplication`),
     activities: requireTextArray(value.activities, `${source}.activities`, 12, 80),
     visibleIntent: requireText(value.visibleIntent, `${source}.visibleIntent`, 500),
     keyTasks: requireTextArray(value.keyTasks, `${source}.keyTasks`, 6, 120),
@@ -185,6 +195,31 @@ function validateSurface(value, source) {
     appName: requireText(value.appName, `${source}.appName`, 80),
     windowTitle: requireText(value.windowTitle, `${source}.windowTitle`, 160),
     domain: value.domain === null ? null : requireHostnameOnly(value.domain, `${source}.domain`)
+  };
+}
+
+function validateApplication(value, source) {
+  requireObject(value, source);
+  rejectUnexpectedFields(value, applicationFields, source);
+
+  return {
+    name: requireText(value.name, `${source}.name`, 80),
+    windowTitle: value.windowTitle === null ? null : requireText(value.windowTitle, `${source}.windowTitle`, 160),
+    domain: value.domain === null ? null : requireHostnameOnly(value.domain, `${source}.domain`),
+    isPrimary: requireBoolean(value.isPrimary, `${source}.isPrimary`),
+    primaryReason: requireText(value.primaryReason, `${source}.primaryReason`, 180)
+  };
+}
+
+function validatePrimaryApplication(value, source) {
+  requireObject(value, source);
+  rejectUnexpectedFields(value, primaryApplicationFields, source);
+
+  return {
+    name: requireText(value.name, `${source}.name`, 80),
+    windowTitle: value.windowTitle === null ? null : requireText(value.windowTitle, `${source}.windowTitle`, 160),
+    domain: value.domain === null ? null : requireHostnameOnly(value.domain, `${source}.domain`),
+    primaryReason: requireText(value.primaryReason, `${source}.primaryReason`, 180)
   };
 }
 

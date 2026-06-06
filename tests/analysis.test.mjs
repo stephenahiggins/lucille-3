@@ -1,10 +1,13 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildActivityTimeline } from "../src/analysis/activityTimeline.mjs";
+import { debugFrameAnalysis } from "../src/analysis/debugFrame.mjs";
 import { evaluateOpenAIModels } from "../src/analysis/modelEvaluation.mjs";
 import { runAnalysis } from "../src/analysis/runAnalysis.mjs";
 import { handleCaptureAction, readCaptureState } from "../src/capture/controller.mjs";
@@ -14,6 +17,35 @@ import { assertPrivacySafe } from "../src/privacy/safety.mjs";
 import { generateDailyReport } from "../src/reports/dailyReport.mjs";
 import { exportSkillProposal } from "../src/skills/exporters.mjs";
 import { createSkillUiServer } from "../src/ui/server.mjs";
+
+const execFileAsync = promisify(execFile);
+const originalFetch = globalThis.fetch;
+
+globalThis.fetch = async (url, options = {}) => {
+  const parsedUrl = new URL(String(url));
+  const body = JSON.parse(options.body ?? "{}");
+  if (
+    ["127.0.0.1", "localhost"].includes(parsedUrl.hostname) &&
+    parsedUrl.pathname === "/api/generate" &&
+    typeof body.prompt === "string" &&
+    typeof body.model === "string"
+  ) {
+    const observation = parseObservationFromOllamaPrompt(body.prompt);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify(buildLocalVisualTestResponse(observation))
+      })
+    };
+  }
+
+  if (typeof originalFetch === "function") {
+    return originalFetch(url, options);
+  }
+
+  throw new Error(`Unexpected fetch URL in test: ${url}`);
+};
 
 test("runAnalysis writes deterministic privacy-safe analysis artifacts", async () => {
   const root = fixtureRoot();
@@ -43,6 +75,10 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
 
   assert.equal(frames[0].schemaVersion, "frame-analysis.v1");
   assert.equal(frames[0].model, "moondream:1.8b");
+  assert.ok(Array.isArray(frames[0].applications));
+  assert.ok(frames[0].applications.length >= 1);
+  assert.equal(frames[0].applications.filter((application) => application.isPrimary).length, 1);
+  assert.equal(frames[0].primaryApplication.name, frames[0].applications.find((application) => application.isPrimary).name);
   assert.ok(Array.isArray(frames[0].keyTasks));
   assert.ok(frames[0].keyTasks.length > 0);
   assert.match(frames[0].keyTasks.join(" "), /attendance|report|review|reconcile/i);
@@ -80,7 +116,7 @@ test("runAnalysis writes deterministic privacy-safe analysis artifacts", async (
   assert.equal(patterns.patterns[0].repeatedAcrossEvidence.length, 3);
   assert.match(patterns.patterns[0].summary, /clustered/i);
   assert.match(patterns.patterns[0].signals.join(" "), /hurdle|dwell|switch|reconciliation/i);
-  assert.equal(patterns.synthesis.rawMediaLifecycle.mediaFilesObserved, 0);
+  assert.equal(patterns.synthesis.rawMediaLifecycle.mediaFilesObserved, 3);
   assert.equal(proposals.proposals[0].status, "proposed");
   assert.deepEqual(proposals.proposals[0].targetTools, ["Claude", "Codex", "Cursor", "ChatGPT"]);
   assert.equal(new Set(proposals.proposals.map((proposal) => proposal.id)).size, proposals.proposals.length);
@@ -179,6 +215,49 @@ test("CLI tasks command lists common tasks before matching skills", async () => 
   assert.match(output, /\[employee_weekly_report\]/);
   assert.match(output, /\[workflow_automation\]/);
   assert.match(output, /\[ai_assistance\]/);
+});
+
+test("CLI analyse writes a latest debug analysis JSON bundle", async () => {
+  const root = fixtureRoot();
+  const debugPath = path.join(root, "debug", "latest-debug-analysis.json");
+  const server = await startLocalOllamaTestServer();
+
+  let output;
+  try {
+    const result = await execFileAsync("node", [
+      path.join(process.cwd(), "src", "cli.mjs"),
+      "analyse",
+      "--day", "2026-05-30",
+      "--model", "moondream:1.8b",
+      "--provider", "ollama",
+      "--slides", "1,3",
+      "--debug-output", debugPath
+    ], {
+      cwd: root,
+      env: {
+        ...process.env,
+        OLLAMA_HOST: server.url
+      },
+      encoding: "utf8"
+    });
+    output = result.stdout;
+  } finally {
+    await server.close();
+  }
+
+  const debugOutput = JSON.parse(readFileSync(debugPath, "utf8"));
+  assert.match(output, /Debug JSON:/);
+  assert.equal(debugOutput.schemaVersion, "debug-analysis.v1");
+  assert.equal(debugOutput.result.frameCount, 2);
+  assert.equal(debugOutput.result.analysisDir, "storage/analysis/2026-05-30");
+  assert.deepEqual(debugOutput.artifacts.frameAnalysis.map((frame) => frame.frameId), [
+    "2026-05-30-mock-frame-001",
+    "2026-05-30-mock-frame-003"
+  ]);
+  assert.equal(debugOutput.artifacts.activityTimeline.schemaVersion, "activity-timeline.v1");
+  assert.equal(debugOutput.artifacts.workPatterns.schemaVersion, "work-patterns.v1");
+  assert.equal(debugOutput.artifacts.skillProposals.schemaVersion, "skill-proposals.v1");
+  assert.equal(debugOutput.artifacts.taskSkillSummary.schemaVersion, "task-skill-summary.v1");
 });
 
 test("activity timeline groups repeated screenshots into a dwell-bearing segment", () => {
@@ -406,9 +485,9 @@ test("runAnalysis retains day-scoped raw media by default after frame analysis",
 
   assert.equal(result.rawMediaLifecycle.debugRetentionExplicitlyEnabled, false);
   assert.equal(result.rawMediaLifecycle.action, "retained_by_default");
-  assert.equal(result.rawMediaLifecycle.mediaFilesObserved, 1);
+  assert.equal(result.rawMediaLifecycle.mediaFilesObserved, 4);
   assert.equal(result.rawMediaLifecycle.mediaFilesDeleted, 0);
-  assert.equal(result.rawMediaLifecycle.mediaFilesRetained, 1);
+  assert.equal(result.rawMediaLifecycle.mediaFilesRetained, 4);
   assert.equal(existsSync(screenshotPath), true);
   assert.equal(existsSync(sidecarPath), true);
 });
@@ -429,8 +508,8 @@ test("runAnalysis deletes day-scoped raw media only when explicitly requested", 
 
   assert.equal(result.rawMediaLifecycle.debugRetentionExplicitlyEnabled, false);
   assert.equal(result.rawMediaLifecycle.action, "deleted_after_analysis");
-  assert.equal(result.rawMediaLifecycle.mediaFilesObserved, 1);
-  assert.equal(result.rawMediaLifecycle.mediaFilesDeleted, 1);
+  assert.equal(result.rawMediaLifecycle.mediaFilesObserved, 4);
+  assert.equal(result.rawMediaLifecycle.mediaFilesDeleted, 4);
   assert.equal(result.rawMediaLifecycle.mediaFilesRetained, 0);
   assert.equal(existsSync(screenshotPath), false);
 });
@@ -456,6 +535,68 @@ test("runAnalysis can analyse a bounded observation chunk for local vision testi
   assert.equal(frames.length, 1);
   assert.equal(frames[0].frameId, "2026-05-30-mock-frame-002");
   assert.equal(frames[0].evidenceId, "fixture-evidence-002");
+});
+
+test("runAnalysis can analyse selected slide groups for debug analysis", async () => {
+  const root = fixtureRoot();
+
+  const result = await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    slides: "1,3"
+  });
+
+  const analysisDir = path.join(root, "storage", "analysis", "2026-05-30");
+  const frames = readFileSync(path.join(analysisDir, "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+
+  assert.equal(result.frameCount, 2);
+  assert.deepEqual(frames.map((frame) => frame.frameId), [
+    "2026-05-30-mock-frame-001",
+    "2026-05-30-mock-frame-003"
+  ]);
+  assert.deepEqual(frames.map((frame) => frame.evidenceId), [
+    "fixture-evidence-001",
+    "fixture-evidence-003"
+  ]);
+});
+
+test("runAnalysis rejects invalid debug slide selections", async () => {
+  const root = fixtureRoot();
+
+  await assert.rejects(
+    runAnalysis({
+      root,
+      day: "2026-05-30",
+      model: "moondream:1.8b",
+      slides: "3-1"
+    }),
+    /range end must be greater than or equal to start/
+  );
+
+  await assert.rejects(
+    runAnalysis({
+      root,
+      day: "2026-05-30",
+      model: "moondream:1.8b",
+      slides: "4"
+    }),
+    /outside the 3 observation/
+  );
+
+  await assert.rejects(
+    runAnalysis({
+      root,
+      day: "2026-05-30",
+      model: "moondream:1.8b",
+      slides: "1,3",
+      limit: 1
+    }),
+    /--slides cannot be combined/
+  );
 });
 
 test("runAnalysis rejects an empty observation chunk", async () => {
@@ -575,6 +716,10 @@ test("runAnalysis rejects excluded app observations before provider selection", 
 
 test("explicit Ollama provider fails clearly when local raw media is unavailable", async () => {
   const root = fixtureRoot();
+  rmSync(path.join(root, "storage", "captures", "2026-05-30", "raw-media"), {
+    recursive: true,
+    force: true
+  });
 
   await assert.rejects(
     runAnalysis({
@@ -586,7 +731,7 @@ test("explicit Ollama provider fails clearly when local raw media is unavailable
         throw new Error("should not request without raw media");
       }
     }),
-    /No local raw media found.*Use --provider mock/
+    /No local raw media found.*Mock fixture analysis is disabled/
   );
 });
 
@@ -662,10 +807,33 @@ test("Ollama provider sends only day-scoped local raw media and persists structu
         ok: true,
         status: 200,
         json: async () => ({
-          response: JSON.stringify({
-            activity: "code_review",
-            visibleIntent: "Reviewing a local-first analysis workflow.",
-            evidenceSummaries: [{ summary: "local visual model saw a development workflow", probability: "high" }],
+	          response: JSON.stringify({
+	            activity: "code_review",
+	            visibleIntent: "Reviewing a local-first analysis workflow.",
+	            applications: [
+	              {
+	                name: "Cursor",
+	                windowTitle: "Lucille project workspace",
+	                domain: null,
+	                isPrimary: false,
+	                primaryReason: "Code editor is visible but the cursor is not on it."
+	              },
+	              {
+	                name: "Terminal",
+	                windowTitle: "Lucille tests",
+	                domain: null,
+	                isPrimary: true,
+	                primaryReason: "Mouse cursor is positioned over the terminal output area."
+	              }
+	            ],
+	            primaryApplication: {
+	              name: "Terminal",
+	              windowTitle: "Lucille tests",
+	              domain: null,
+	              primaryReason: "Mouse cursor is positioned over the terminal output area."
+	            },
+	            visitedUrls: [],
+	            evidenceSummaries: [{ summary: "local visual model saw a development workflow", probability: "high" }],
             riskFlags: [{ flag: "possible_sensitive_visible_text", probability: "low" }]
           })
         })
@@ -691,8 +859,12 @@ test("Ollama provider sends only day-scoped local raw media and persists structu
   assert.equal(frames[0].provider, "ollama");
   assert.equal(frames[0].evidenceId, "obs-local-001-raw-frame");
   assert.equal(frames[0].evidence[0].kind, "local_visual_summary");
-  assert.equal(frames[0].evidence[0].summary, "local visual model saw a development workflow");
-  assert.deepEqual(frames[0].riskFlags, ["possible_sensitive_visible_text"]);
+	  assert.equal(frames[0].evidence[0].summary, "local visual model saw a development workflow");
+	  assert.deepEqual(frames[0].applications.map((application) => application.name), ["Cursor", "Terminal"]);
+	  assert.deepEqual(frames[0].visitedUrls, []);
+	  assert.equal(frames[0].primaryApplication.name, "Terminal");
+	  assert.match(frames[0].primaryApplication.primaryReason, /cursor/i);
+	  assert.deepEqual(frames[0].riskFlags, ["possible_sensitive_visible_text"]);
   assert.equal(patterns.provider, "ollama");
   assert.deepEqual(patterns.patterns[0].repeatedAcrossEvidence, ["obs-local-001-raw-frame"]);
   assert.equal(patterns.synthesis.rawScreenshotsSent, false);
@@ -700,6 +872,329 @@ test("Ollama provider sends only day-scoped local raw media and persists structu
   assert.equal(existsSync(path.join(rawMediaDir, "obs-local-001.png")), true);
   assert.doesNotThrow(() => assertPrivacySafe(frames, "ollamaFrames"));
   assert.doesNotThrow(() => assertPrivacySafe(patterns, "ollamaPatterns"));
+});
+
+test("Ollama provider differentiates Discord Slack and Microsoft Teams applications", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-chat-001.png"), "local chat apps image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-chat-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Browser",
+      windowTitle: "Visible communication workspace",
+      domain: null,
+      activity: "communication_review",
+      visibleTextSummary: "Discord, Slack, and Microsoft Teams communication windows are visible.",
+      redactedSignals: ["discord channel visible", "slack workspace visible", "teams chat visible"],
+      evidenceIds: ["obs-chat-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "communication_review",
+          visibleIntent: "Reviewing communication across visible chat applications.",
+          applications: [
+            {
+              name: "Chat",
+              windowTitle: "community-server",
+              domain: "discord.com",
+              isPrimary: true,
+              primaryReason: "Cursor is over the Discord channel list."
+            },
+            {
+              name: "Workspace chat",
+              windowTitle: "Engineering Slack",
+              domain: "slack.com",
+              isPrimary: false,
+              primaryReason: "Slack is visible but the cursor is not on it."
+            },
+            {
+              name: "Teams",
+              windowTitle: "Daily standup",
+              domain: "teams.microsoft.com",
+              isPrimary: false,
+              primaryReason: "Teams is visible but not under the cursor."
+            }
+          ],
+          primaryApplication: {
+            name: "Chat",
+            windowTitle: "community-server",
+            domain: "discord.com",
+            primaryReason: "Cursor is over the Discord channel list."
+          },
+          keyTasks: ["Draft or review follow-up communication"],
+          evidenceSummaries: [
+            "Discord channel list is visible",
+            "Slack workspace is visible",
+            "Microsoft Teams chat is visible"
+          ],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), [
+    "Discord",
+    "Slack",
+    "Microsoft Teams",
+    "Browser"
+  ]);
+  assert.equal(frame.primaryApplication.name, "Discord");
+  assert.equal(frame.applications.filter((application) => application.isPrimary).length, 1);
+});
+
+test("Ollama provider treats the Arbor data and AI communication window as Slack", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-slack-001.png"), "local slack image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-slack-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Browser",
+      windowTitle: "Visible communication workspace",
+      domain: null,
+      activity: "communication_review",
+      visibleTextSummary: "The Arbor data and AI Slack channel is visible.",
+      redactedSignals: ["arbor-data-and-ai channel visible", "slack workspace visible"],
+      evidenceIds: ["obs-slack-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "communication_review",
+          visibleIntent: "Reviewing the Arbor data and AI communication channel.",
+          applications: [
+            {
+              name: "Discord",
+              windowTitle: "arbor-data-and-ai",
+              domain: "discord.com",
+              isPrimary: true,
+              primaryReason: "Cursor is over the communication window."
+            }
+          ],
+          primaryApplication: {
+            name: "Discord",
+            windowTitle: "arbor-data-and-ai",
+            domain: "discord.com",
+            primaryReason: "Cursor is over the communication window."
+          },
+          keyTasks: ["Draft or review follow-up communication"],
+          evidenceSummaries: ["Arbor data and AI Slack channel is visible"],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.equal(frame.applications[0].name, "Slack");
+  assert.equal(frame.primaryApplication.name, "Slack");
+});
+
+test("Ollama provider extracts browser visited URLs and strips private URL parts", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-browser-001.png"), "local browser image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-browser-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Google Chrome",
+      windowTitle: "Reports",
+      domain: "reports.example.test",
+      activity: "browser_review",
+      visibleTextSummary: "A browser report page is visible.",
+      redactedSignals: ["browser address bar visible"],
+      evidenceIds: ["obs-browser-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "browser_review",
+          visibleIntent: "Reviewing a browser report page.",
+          applications: [
+            {
+              name: "Google Chrome",
+              windowTitle: "Reports",
+              domain: "reports.example.test",
+              currentUrl: "https://reports.example.test/students/attendance?token=secret#section",
+              isPrimary: true,
+              primaryReason: "Cursor is over the browser content."
+            },
+            {
+              name: "Safari",
+              windowTitle: "GitHub PR",
+              domain: "https://github.com/org/repo/pull/3606?tab=files",
+              url: "github.com/org/repo/pull/3606",
+              isPrimary: false,
+              primaryReason: "Secondary browser window is visible."
+            }
+          ],
+          primaryApplication: {
+            name: "Google Chrome",
+            windowTitle: "Reports",
+            domain: "reports.example.test",
+            primaryReason: "Cursor is over the browser content."
+          },
+          visitedUrls: [
+            "reports.example.test/students/attendance?utm_source=capture",
+            { url: "https://github.com/org/repo/pull/3606?notification_referrer_id=private" }
+          ],
+          keyTasks: ["Review report or dashboard state"],
+          evidenceSummaries: ["A browser report page is visible"],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.visitedUrls, [
+    "https://reports.example.test/students/attendance",
+    "https://github.com/org/repo/pull/3606",
+    "https://reports.example.test/",
+    "https://github.com/"
+  ]);
+  assert.equal(frame.applications[1].domain, "github.com");
+  assert.doesNotMatch(JSON.stringify(frame), /token=|utm_source|notification_referrer_id|#/);
+  assert.doesNotThrow(() => assertPrivacySafe(frame, "browserFrame"));
+});
+
+test("debugFrameAnalysis analyses one frame and exposes the prompt without writing artifacts", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-local-001.png"), "local fixture image one");
+  writeFileSync(path.join(rawMediaDir, "obs-local-002.png"), "local fixture image two");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    [
+      {
+        schemaVersion: "observation.v1",
+        id: "obs-local-001",
+        capturedAt: "2026-05-30T09:00:00.000Z",
+        appName: "Cursor",
+        windowTitle: "Lucille project workspace",
+        domain: null,
+        activity: "code_editing",
+        visibleTextSummary: "A visible screen frame was captured for local analysis.",
+        redactedSignals: ["explicit local capture"],
+        evidenceIds: ["obs-local-001-raw-frame"]
+      },
+      {
+        schemaVersion: "observation.v1",
+        id: "obs-local-002",
+        capturedAt: "2026-05-30T09:00:03.000Z",
+        appName: "Terminal",
+        windowTitle: "Lucille prompt debugging",
+        domain: null,
+        activity: "debugging_prompt",
+        visibleTextSummary: "A visible screen frame was captured for local prompt debugging.",
+        redactedSignals: ["explicit local prompt debug capture"],
+        evidenceIds: ["obs-local-002-raw-frame"]
+      }
+    ].map((observation) => JSON.stringify(observation)).join("\n") + "\n"
+  );
+
+  let request = null;
+  const result = await debugFrameAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    frameId: "obs-local-002-raw-frame",
+    fetchImpl: async (url, options) => {
+      request = {
+        url,
+        body: JSON.parse(options.body)
+      };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: JSON.stringify({
+            activity: "debugging_prompt",
+            visibleIntent: "Testing a single screenshot analysis prompt.",
+            keyTasks: ["Inspect command output and troubleshoot blockers"],
+            evidenceSummaries: ["terminal shows a prompt debugging workflow"],
+            riskFlags: []
+          })
+        })
+      };
+    }
+  });
+
+  assert.equal(result.schemaVersion, "debug-frame-analysis.v1");
+  assert.equal(result.selected.index, 1);
+  assert.equal(result.selected.frameId, "obs-local-002");
+  assert.equal(result.selected.rawMediaPath, "storage/captures/2026-05-30/raw-media/obs-local-002.png");
+  assert.match(result.promptSource, /buildOllamaPrompt/);
+  assert.match(result.prompt, /Return JSON only/);
+  assert.match(result.prompt, /Lucille 3/);
+  assert.equal(result.frame.frameId, "obs-local-002");
+  assert.equal(result.frame.evidenceId, "obs-local-002-raw-frame");
+  assert.equal(result.frame.evidence[0].summary, "terminal shows a prompt debugging workflow");
+  assert.equal(request.url, "http://127.0.0.1:11434/api/generate");
+  assert.equal(request.body.images.length, 1);
+  assert.deepEqual(request.body.images, [Buffer.from("local fixture image two").toString("base64")]);
+  assert.equal(existsSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl")), false);
+  assert.doesNotThrow(() => assertPrivacySafe(result, "debugFrame"));
 });
 
 test("Ollama provider analyses frames sequentially", async () => {
@@ -837,8 +1332,25 @@ test("Ollama provider rejects generic import metadata as visual analysis", async
 
 test("legacy retainRawMedia option does not delete source images", async () => {
   const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
   const rawMediaDir = path.join(root, "storage", "captures", "2026-05-30", "raw-media");
+  rmSync(rawMediaDir, { recursive: true, force: true });
   mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "frame-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Cursor",
+      windowTitle: "Lucille project workspace",
+      domain: null,
+      activity: "code_editing",
+      visibleTextSummary: "A visible screen frame was captured for local analysis.",
+      redactedSignals: ["explicit local capture"],
+      evidenceIds: ["frame-001-raw-frame"]
+    }) + "\n"
+  );
   const screenshotPath = path.join(rawMediaDir, "frame-001.webp");
   writeFileSync(screenshotPath, "not a real image");
 
@@ -860,6 +1372,7 @@ test("runAnalysis does not follow a symlinked raw media directory", async (t) =>
   const captureDayDir = path.join(root, "storage", "captures", "2026-05-30");
   const outsideDir = mkdtempSync(path.join(os.tmpdir(), "lucille-outside-media-"));
   mkdirSync(captureDayDir, { recursive: true });
+  rmSync(path.join(captureDayDir, "raw-media"), { recursive: true, force: true });
 
   const outsideScreenshotPath = path.join(outsideDir, "outside.png");
   writeFileSync(outsideScreenshotPath, "not a real image");
@@ -871,13 +1384,14 @@ test("runAnalysis does not follow a symlinked raw media directory", async (t) =>
     return;
   }
 
-  const result = await runAnalysis({
-    root,
-    day: "2026-05-30",
-    model: "moondream:1.8b"
-  });
-
-  assert.equal(result.rawMediaLifecycle.mediaFilesObserved, 0);
+  await assert.rejects(
+    runAnalysis({
+      root,
+      day: "2026-05-30",
+      model: "moondream:1.8b"
+    }),
+    /No local raw media found/
+  );
   assert.equal(existsSync(outsideScreenshotPath), true);
 });
 
@@ -907,9 +1421,21 @@ test("OpenAI analysis mode uses Responses API with redacted structured evidence"
     openai: true,
     openaiModel: "gpt-5.5",
     env: { OPENAI_API_KEY: "test-key" },
-    fetchImpl: async (url, options) => {
-      request = {
-        url,
+	    fetchImpl: async (url, options) => {
+	      if (String(url).includes("/api/generate")) {
+	        const body = JSON.parse(options.body);
+	        const observation = parseObservationFromOllamaPrompt(body.prompt);
+	        return {
+	          ok: true,
+	          status: 200,
+	          json: async () => ({
+	            response: JSON.stringify(buildLocalVisualTestResponse(observation))
+	          })
+	        };
+	      }
+
+	      request = {
+	        url,
         method: options.method,
         headers: options.headers,
         body: JSON.parse(options.body)
@@ -1233,7 +1759,7 @@ test("weekly report writes privacy-safe Markdown from structured analysis artifa
     root,
     day: "2026-05-30",
     model: "moondream:1.8b",
-    provider: "mock"
+    provider: "ollama"
   });
 
   const result = generateDailyReport({
@@ -1294,6 +1820,20 @@ test("make verify-mmp invokes the release readiness gate", () => {
 
   assert.match(makefile, /make verify-mmp/);
   assert.match(verifyTarget, /DAY="\$\(DAY\)" \$\(NPM\) run verify:mmp/);
+});
+
+test("debug make targets write latest JSON to an ignored debug directory", () => {
+  const makefile = readFileSync(path.join(process.cwd(), "Makefile"), "utf8");
+  const gitignore = readFileSync(path.join(process.cwd(), ".gitignore"), "utf8");
+  const dirsTarget = makefile.match(/^dirs:.*(?:\n\t.*)*/m)?.[0] ?? "";
+  const debugAnalysisTarget = makefile.match(/^debug-analysis:.*(?:\n\t.*)*/m)?.[0] ?? "";
+  const debugFrameTarget = makefile.match(/^debug-frame:.*(?:\n\t.*)*/m)?.[0] ?? "";
+
+  assert.match(makefile, /^DEBUG_DIR \?= debug$/m);
+  assert.match(gitignore, /^debug\/$/m);
+  assert.match(dirsTarget, /"\$\(DEBUG_DIR\)"/);
+  assert.match(debugAnalysisTarget, /--debug-output \$\(DEBUG_DIR\)\/latest-debug-analysis\.json/);
+  assert.match(debugFrameTarget, /--debug-output \$\(DEBUG_DIR\)\/latest-debug-frame\.json/);
 });
 
 test("approved skill export writes Claude Codex Cursor and ChatGPT bundles", async () => {
@@ -1412,6 +1952,8 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     assert.match(pageHtml, /id="common-tasks"/);
     assert.match(pageHtml, /task-evidence/);
     assert.match(pageHtml, /frame-preview/);
+    assert.match(pageHtml, /summary-frame-links/);
+    assert.match(pageHtml, /All referenced frames/);
     assert.match(pageHtml, /api\/raw-frame/);
     assert.doesNotMatch(pageHtml, /type="date"/);
 
@@ -2039,7 +2581,7 @@ test("RALF status reports generated MMP workflow evidence separately from scaffo
     root,
     day: "2026-05-30",
     model: "moondream:1.8b",
-    provider: "mock"
+    provider: "ollama"
   });
   generateDailyReport({
     root,
@@ -2074,7 +2616,7 @@ test("RALF status reports generated MMP workflow evidence separately from scaffo
 });
 
 test("RALF status does not count an empty raw-media directory as capture evidence", () => {
-  const root = fixtureRoot();
+  const root = mkdtempSync(path.join(os.tmpdir(), "lucille-analysis-"));
   mkdirSync(path.join(root, "storage", "captures", "2026-05-30", "raw-media"), { recursive: true });
 
   const output = execFileSync("node", [path.join(process.cwd(), "scripts", "summarise-ralf-status.mjs")], {
@@ -2142,8 +2684,14 @@ test("RALF status rejects operator smoke evidence when workflow artifacts are no
     root,
     day: "2026-05-30",
     model: "moondream:1.8b",
-    provider: "mock"
+    provider: "ollama"
   });
+  const frameAnalysisPath = path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl");
+  const nonOllamaFrames = readFileSync(frameAnalysisPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => ({ ...JSON.parse(line), provider: "test-provider" }));
+  writeFileSync(frameAnalysisPath, nonOllamaFrames.map((frame) => JSON.stringify(frame)).join("\n") + "\n");
   generateDailyReport({
     root,
     day: "2026-05-30"
@@ -2425,7 +2973,126 @@ function fixtureRoot() {
     path.join(process.cwd(), "fixtures", "mock-observations.json"),
     path.join(fixturesDir, "mock-observations.json")
   );
+  writeCapturedFixtureObservations(root, "2026-05-30");
   return root;
+}
+
+function writeCapturedFixtureObservations(root, day) {
+  const fixtures = JSON.parse(readFileSync(path.join(root, "fixtures", "mock-observations.json"), "utf8"));
+  const captureDir = path.join(root, "storage", "captures", day);
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  const observations = fixtures.map((fixture, index) => ({
+    schemaVersion: "observation.v1",
+    id: `${day}-${fixture.fixtureId}`,
+    capturedAt: `${day}T09:${String(index * 7).padStart(2, "0")}:00.000Z`,
+    appName: fixture.appName,
+    windowTitle: fixture.windowTitle,
+    domain: fixture.domain,
+    activity: fixture.activity,
+    visibleTextSummary: fixture.visibleTextSummary,
+    redactedSignals: fixture.redactedSignals,
+    evidenceIds: fixture.evidenceIds
+  }));
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    observations.map((observation) => JSON.stringify(observation)).join("\n") + "\n"
+  );
+  for (const observation of observations) {
+    writeFileSync(path.join(rawMediaDir, `${observation.id}.png`), `local visual frame for ${observation.id}`);
+  }
+}
+
+function parseObservationFromOllamaPrompt(prompt) {
+  const marker = "Existing safe observation metadata: ";
+  const index = String(prompt ?? "").indexOf(marker);
+  if (index === -1) return {};
+  const text = String(prompt).slice(index + marker.length);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+function buildLocalVisualTestResponse(observation = {}) {
+  const text = [
+    observation.activity,
+    observation.visibleTextSummary,
+    ...(observation.redactedSignals ?? [])
+  ].join(" ").toLowerCase();
+  const attendance = /\b(attendance|absence|parent|student|pupil|mis|sims)\b/.test(text);
+  const development = /\b(github|pull request|\bpr\b|code|diff|repository|cursor|codex|terminal|console|npm|make|test)\b/.test(text);
+  const keyTasks = [];
+  if (attendance) keyTasks.push("Review attendance report evidence");
+  if (/\b(reconcile|reconciliation|check|qa|manual|review)\b/.test(text)) keyTasks.push("Reconcile visible evidence and quality checks");
+  if (/\b(email|message|draft|follow-up|communication|slack|teams|chat)\b/.test(text)) keyTasks.push("Draft or review follow-up communication");
+  if (development) keyTasks.push("Review engineering work and code context");
+  if (development && /\b(terminal|console|command|npm|make|test|build|error|failed|exception)\b/.test(text)) {
+    keyTasks.push("Inspect command output and troubleshoot blockers");
+  }
+  if (!development && /\b(report|dashboard|chart|metric|spreadsheet|table|export)\b/.test(text)) {
+    keyTasks.push("Review report or dashboard state");
+  }
+
+  const appName = observation.appName ?? "Visible work app";
+  const summaries = (observation.redactedSignals?.length ? observation.redactedSignals : [observation.visibleTextSummary ?? "visible workflow"])
+    .slice(0, 4)
+    .map((signal) => `${appName} shows ${signal}`);
+
+  return {
+    activity: observation.activity ?? "visible_work",
+    visibleIntent: observation.visibleTextSummary ?? `Reviewing visible work in ${appName}.`,
+    applications: [
+      {
+        name: appName,
+        windowTitle: observation.windowTitle ?? null,
+        domain: observation.domain ?? null,
+        isPrimary: true,
+        primaryReason: "Cursor position is not visible in the test frame; using focused active window metadata."
+      },
+      {
+        name: "Background Reference App",
+        windowTitle: "Visible secondary work surface",
+        domain: null,
+        isPrimary: false,
+        primaryReason: "Visible secondary application, but not under the cursor."
+      }
+    ],
+    primaryApplication: {
+      name: appName,
+      windowTitle: observation.windowTitle ?? null,
+      domain: observation.domain ?? null,
+      primaryReason: "Cursor position is not visible in the test frame; using focused active window metadata."
+    },
+    keyTasks: keyTasks.length > 0 ? keyTasks : ["Review a visible work surface"],
+    evidenceSummaries: summaries,
+    riskFlags: []
+  };
+}
+
+async function startLocalOllamaTestServer() {
+  const server = createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const observation = parseObservationFromOllamaPrompt(body.prompt);
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        response: JSON.stringify(buildLocalVisualTestResponse(observation))
+      }));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })
+  };
 }
 
 function syntheticFrame(options = {}) {
@@ -2439,12 +3106,28 @@ function syntheticFrame(options = {}) {
     frameId: id,
     day,
     capturedAt: options.capturedAt ?? `${day}T09:00:00.000Z`,
-    provider: "mock",
+    provider: "ollama",
     model: "test-model",
     surface: {
       appName: options.appName ?? "Cursor",
       windowTitle: options.windowTitle ?? "Lucille project workspace",
       domain: options.domain ?? null
+    },
+    applications: options.applications ?? [
+      {
+        name: options.appName ?? "Cursor",
+        windowTitle: options.windowTitle ?? "Lucille project workspace",
+        domain: options.domain ?? null,
+        isPrimary: true,
+        primaryReason: "Synthetic frame uses focused active window metadata."
+      }
+    ],
+    visitedUrls: options.visitedUrls ?? [],
+    primaryApplication: options.primaryApplication ?? {
+      name: options.appName ?? "Cursor",
+      windowTitle: options.windowTitle ?? "Lucille project workspace",
+      domain: options.domain ?? null,
+      primaryReason: "Synthetic frame uses focused active window metadata."
     },
     activities: options.activities ?? ["visible_work"],
     visibleIntent: options.visibleIntent ?? "Reviewing a visible work surface.",

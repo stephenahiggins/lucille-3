@@ -30,7 +30,7 @@ export async function evaluateOpenAIModels(options = {}) {
   await runAnalysis({
     root,
     day,
-    provider: "mock",
+    provider: options.provider ?? "auto",
     model: baselineModel,
     deleteRawMedia: false
   });

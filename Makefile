@@ -7,6 +7,10 @@ MODEL ?= $(LUCILLE_LOCAL_MODEL)
 PROVIDER ?= auto
 ANALYSE_LIMIT ?=
 ANALYSE_OFFSET ?= 0
+SLIDES ?=
+DEBUG_DIR ?= debug
+DEBUG_FRAME ?=
+DEBUG_OFFSET ?= 0
 OPENAI ?= 0
 OPENAI_MODEL ?= $(LUCILLE_OPENAI_MODEL)
 EVAL_MODELS ?= $(LUCILLE_EVAL_MODELS)
@@ -20,18 +24,20 @@ NODE ?= node
 NPM ?= npm
 CLI ?= dist/cli.js
 
-.PHONY: help dirs build capture capture-permission capture-pause capture-resume capture-stop capture-once analyse report model-eval export-skill ui recording-dist dist-ui-recording operator-smoke-preflight operator-smoke operator-smoke-existing verify-mmp status ralf ralf-mmp ralf-closeout
+.PHONY: help dirs build capture capture-permission capture-pause capture-resume capture-stop capture-once analyse debug-analysis debug-frame report model-eval export-skill ui recording-dist dist-ui-recording operator-smoke-preflight operator-smoke operator-smoke-existing verify-mmp status ralf ralf-mmp ralf-closeout
 
 help:
 	@echo "Lucille commands"
 	@echo "  make capture        # capture visible frames every $(CAPTURE_INTERVAL)s; Ctrl-C to stop"
 	@echo "  make analyse DAY=$(DAY) MODEL=$(MODEL) PROVIDER=$(PROVIDER) ANALYSE_LIMIT=$(ANALYSE_LIMIT) OPENAI=$(OPENAI)"
+	@echo "  make debug-analysis DAY=$(DAY) PROVIDER=$(PROVIDER) SLIDES=1-3,7,10-12 # analyse selected 1-based slide/frame groups"
+	@echo "  make debug-frame DAY=$(DAY) DEBUG_FRAME=<obs-or-evidence-id> # analyse one raw screenshot and print the prompt/output"
 	@echo "  make model-eval     # compare OpenAI models for weekly efficiency report quality"
 	@echo "  make verify-mmp     # validate the repeated-task evidence-to-skill MMP gate"
 	@echo "  make ui             # edit, generate, and download skill proposals in a local web UI"
 
 dirs:
-	@mkdir -p logs/ralf storage output
+	@mkdir -p logs/ralf storage output "$(DEBUG_DIR)"
 
 build: dirs
 	@if [ -f package.json ]; then \
@@ -108,6 +114,47 @@ analyse: build
 		$(NODE) "$(CLI)" $$ARGS; \
 	else \
 		echo "Lucille CLI not found at $(CLI). Intended analysis: day=$(DAY), model=$${MODEL:-from .env}, openai=$(OPENAI), openai_model=$${OPENAI_MODEL:-from .env}."; \
+	fi
+
+debug-analysis: build
+	@if [ -z "$(SLIDES)" ]; then \
+		echo "Set SLIDES to one or more 1-based slide/frame groups, for example: make debug-analysis DAY=$(DAY) SLIDES=1-3,7,10-12"; \
+		exit 2; \
+	fi
+	@if [ -f "$(CLI)" ]; then \
+		ARGS="analyse --day $(DAY) --provider $(PROVIDER) --slides $(SLIDES) --debug-output $(DEBUG_DIR)/latest-debug-analysis.json"; \
+		if [ -n "$(MODEL)" ]; then \
+			ARGS="$$ARGS --model $(MODEL)"; \
+		fi; \
+		if [ "$(DELETE_RAW_MEDIA)" = "1" ]; then \
+			ARGS="$$ARGS --delete-raw-media"; \
+		fi; \
+		if [ "$(OPENAI)" = "1" ]; then \
+			ARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \
+			if [ -n "$(OPENAI_MODEL)" ]; then \
+				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
+			fi; \
+		fi; \
+		echo "$(NODE) $(CLI) $$ARGS"; \
+		$(NODE) "$(CLI)" $$ARGS; \
+	else \
+		echo "Lucille CLI not found at $(CLI). Intended debug analysis: day=$(DAY), slides=$(SLIDES), model=$${MODEL:-from .env}, openai=$(OPENAI), openai_model=$${OPENAI_MODEL:-from .env}."; \
+	fi
+
+debug-frame: build
+	@if [ -f "$(CLI)" ]; then \
+		ARGS="debug-frame --day $(DAY) --offset $(DEBUG_OFFSET) --debug-output $(DEBUG_DIR)/latest-debug-frame.json"; \
+		if [ -n "$(DEBUG_FRAME)" ]; then \
+			ARGS="debug-frame --day $(DAY) --frame-id $(DEBUG_FRAME) --debug-output $(DEBUG_DIR)/latest-debug-frame.json"; \
+		fi; \
+		if [ -n "$(MODEL)" ]; then \
+			ARGS="$$ARGS --model $(MODEL)"; \
+		fi; \
+		echo "Prompt source: src/analysis/ollamaProvider.mjs#buildOllamaPrompt"; \
+		echo "$(NODE) $(CLI) $$ARGS"; \
+		$(NODE) "$(CLI)" $$ARGS; \
+	else \
+		echo "Lucille CLI not found at $(CLI); single-frame prompt debugging is unavailable until scaffolded."; \
 	fi
 
 report: build

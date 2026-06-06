@@ -20,7 +20,6 @@ const bundleRoot = path.join(distRoot, packageName);
 const archivePath = path.join(distRoot, `${packageName}-${version}-${stamp}.tar.gz`);
 
 const runtimeEntries = [
-  "fixtures",
   "src"
 ];
 

@@ -120,10 +120,25 @@ function buildProposalUiData({ root, day, proposalSet }) {
     day,
     proposalSet,
     proposals: proposalSet.proposals,
-    commonTasks
+    commonTasks,
+    rawFrameEvidenceIds: listRawFrameEvidenceIds({ root, day })
   };
   assertPrivacySafe(payload, "proposalUiData");
   return payload;
+}
+
+function listRawFrameEvidenceIds({ root, day }) {
+  const rawMediaDir = path.join(root, "storage", "captures", day, "raw-media");
+  if (!existsSync(rawMediaDir)) return [];
+  return readdirSync(rawMediaDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const parsed = path.parse(entry.name);
+      if (!contentTypeFor(parsed.ext)) return null;
+      return `${parsed.name}-raw-frame`;
+    })
+    .filter(Boolean)
+    .sort();
 }
 
 function readCommonTaskSummaries({ root, day }) {
@@ -281,15 +296,17 @@ function renderPage({ defaultDay }) {
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     button.primary:hover { background: var(--accent-dark); }
     button:disabled { opacity: .45; cursor: not-allowed; }
-    .app { min-height: 100vh; display: grid; grid-template-columns: minmax(260px, 340px) minmax(420px, 1fr) minmax(280px, 360px); }
+    .app { min-height: 100vh; display: grid; grid-template-columns: minmax(260px, 340px) minmax(280px, 360px) minmax(420px, 1fr); }
     aside { border-right: 1px solid var(--line); background: var(--panel); padding: 16px; overflow: auto; }
-    .proposal-sidebar { border-right: 0; border-left: 1px solid var(--line); }
+    .proposal-sidebar { border-left: 0; }
     main { padding: 18px 22px; overflow: auto; }
     h1 { font-size: 20px; margin: 0 0 12px; }
     h2 { font-size: 16px; margin: 18px 0 10px; }
     label { display: grid; gap: 5px; font-size: 12px; font-weight: 700; color: #33414a; }
     input, textarea, select { width: 100%; border: 1px solid var(--line); padding: 8px; background: #fff; color: var(--ink); }
     textarea { min-height: 84px; resize: vertical; line-height: 1.35; }
+    .field-frame-links { margin-top: -8px; }
+    .field-frame-links:empty { display: none; }
     .topbar { display: flex; gap: 8px; align-items: end; margin-bottom: 16px; }
     .topbar label { max-width: 160px; }
     .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
@@ -338,42 +355,6 @@ function renderPage({ defaultDay }) {
       <h2>Common Tasks</h2>
       <div id="common-tasks" class="common-tasks"></div>
     </aside>
-    <main>
-      <h1 id="editor-heading">Select a proposal</h1>
-      <div class="actions">
-        <button id="save" class="primary" disabled>Save edits</button>
-        <button id="generate" disabled>Generate skill files</button>
-        <button id="download" disabled>Download bundle</button>
-      </div>
-      <div id="status" class="status"></div>
-      <section id="editor" class="grid" hidden>
-        <label>ID <input id="id" disabled></label>
-        <label>Category
-          <select id="category">
-            <option value="employee_weekly_report">Employee weekly report</option>
-            <option value="workflow_automation">Workflow automation</option>
-            <option value="ai_assistance">AI assistance</option>
-            <option value="manager_monitoring">Manager monitoring</option>
-            <option value="enterprise_rollout">Enterprise rollout</option>
-          </select>
-        </label>
-        <label class="wide">Title <input id="title"></label>
-        <label class="wide">Summary <textarea id="summary-field"></textarea></label>
-        <label class="wide">Implementation steps <textarea id="steps"></textarea></label>
-        <label class="wide">Expected outcome <textarea id="outcome"></textarea></label>
-        <label>Estimated minutes per week <input id="minutes" type="number" min="1"></label>
-        <label>Confidence <input id="confidence" type="number" min="0" max="1" step="0.01"></label>
-        <label class="wide">Owner <input id="owner"></label>
-        <label class="wide">Rollout metric <textarea id="metric"></textarea></label>
-        <label class="wide">Prerequisites <textarea id="prerequisites"></textarea></label>
-        <label class="wide">Evidence IDs <textarea id="evidence"></textarea></label>
-        <div id="evidence-links" class="wide evidence-links"></div>
-      </section>
-      <section>
-        <h2>Generated Files</h2>
-        <div id="files" class="files"></div>
-      </section>
-    </main>
     <aside class="proposal-sidebar">
       <h1>Proposals</h1>
       <div class="filters">
@@ -410,10 +391,52 @@ function renderPage({ defaultDay }) {
       <div id="summary" class="status"></div>
       <div id="proposal-list" class="list"></div>
     </aside>
+    <main>
+      <h1 id="editor-heading">Select a proposal</h1>
+      <div class="actions">
+        <button id="save" class="primary" disabled>Save edits</button>
+        <button id="generate" disabled>Generate skill files</button>
+        <button id="download" disabled>Download bundle</button>
+      </div>
+      <div id="status" class="status"></div>
+      <section id="editor" class="grid" hidden>
+        <label>ID <input id="id" disabled></label>
+        <label>Category
+          <select id="category">
+            <option value="employee_weekly_report">Employee weekly report</option>
+            <option value="workflow_automation">Workflow automation</option>
+            <option value="ai_assistance">AI assistance</option>
+            <option value="manager_monitoring">Manager monitoring</option>
+            <option value="enterprise_rollout">Enterprise rollout</option>
+          </select>
+        </label>
+        <label class="wide">Title <input id="title"></label>
+        <label class="wide">Summary <textarea id="summary-field"></textarea></label>
+        <div id="summary-frame-links" class="wide evidence-links field-frame-links"></div>
+        <label class="wide">Implementation steps <textarea id="steps"></textarea></label>
+        <div id="steps-frame-links" class="wide evidence-links field-frame-links"></div>
+        <label class="wide">Expected outcome <textarea id="outcome"></textarea></label>
+        <div id="outcome-frame-links" class="wide evidence-links field-frame-links"></div>
+        <label>Estimated minutes per week <input id="minutes" type="number" min="1"></label>
+        <label>Confidence <input id="confidence" type="number" min="0" max="1" step="0.01"></label>
+        <label class="wide">Owner <input id="owner"></label>
+        <label class="wide">Rollout metric <textarea id="metric"></textarea></label>
+        <div id="metric-frame-links" class="wide evidence-links field-frame-links"></div>
+        <label class="wide">Prerequisites <textarea id="prerequisites"></textarea></label>
+        <div id="prerequisites-frame-links" class="wide evidence-links field-frame-links"></div>
+        <label class="wide">Evidence IDs <textarea id="evidence"></textarea></label>
+        <div id="evidence-frame-links" class="wide evidence-links field-frame-links"></div>
+        <div id="editor-frame-links" class="wide evidence-links"></div>
+      </section>
+      <section>
+        <h2>Generated Files</h2>
+        <div id="files" class="files"></div>
+      </section>
+    </main>
   </div>
   <script>
     const fields = {};
-    const state = { proposalSet: null, commonTasks: [], selectedId: null, generated: null };
+    const state = { proposalSet: null, commonTasks: [], rawFrameEvidenceIds: new Set(), selectedId: null, generated: null };
     const ids = ["id", "category", "title", "summary-field", "steps", "outcome", "minutes", "confidence", "owner", "metric", "prerequisites", "evidence"];
     for (const id of ids) fields[id] = document.getElementById(id);
 
@@ -440,6 +463,7 @@ function renderPage({ defaultDay }) {
       if (!response.ok) return setStatus(data.error, true);
       state.proposalSet = data.proposalSet ?? data;
       state.commonTasks = data.commonTasks ?? [];
+      state.rawFrameEvidenceIds = new Set(data.rawFrameEvidenceIds ?? []);
       state.selectedId = state.proposalSet.proposals[0]?.id ?? null;
       state.generated = null;
       render();
@@ -574,7 +598,7 @@ function renderPage({ defaultDay }) {
       fields.metric.value = proposal.rolloutMetric;
       fields.prerequisites.value = proposal.prerequisites.join("\\n");
       fields.evidence.value = proposal.evidenceIds.join("\\n");
-      renderEvidenceLinks(document.getElementById("evidence-links"), proposal.evidenceIds ?? []);
+      renderEditorFrameLinks(proposal);
     }
 
     function syncFromEditor() {
@@ -592,7 +616,7 @@ function renderPage({ defaultDay }) {
       proposal.prerequisites = lines(fields.prerequisites.value);
       proposal.evidenceIds = lines(fields.evidence.value);
       renderListOnly();
-      renderEvidenceLinks(document.getElementById("evidence-links"), proposal.evidenceIds ?? []);
+      renderEditorFrameLinks(proposal);
     }
 
     function renderListOnly() {
@@ -664,24 +688,56 @@ function renderPage({ defaultDay }) {
       return text.split("\\n").map((line) => line.trim()).filter(Boolean);
     }
 
-    function renderEvidenceLinks(container, evidenceIds) {
+    function renderEditorFrameLinks(proposal) {
+      const fieldReferences = [
+        ["summary-frame-links", "Summary frames", idsFromText(fields["summary-field"].value, proposal.evidenceIds ?? [])],
+        ["steps-frame-links", "Step frames", idsFromText(fields.steps.value, proposal.evidenceIds ?? [])],
+        ["outcome-frame-links", "Outcome frames", idsFromText(fields.outcome.value, proposal.evidenceIds ?? [])],
+        ["metric-frame-links", "Metric frames", idsFromText(fields.metric.value, proposal.evidenceIds ?? [])],
+        ["prerequisites-frame-links", "Prerequisite frames", idsFromText(fields.prerequisites.value, proposal.evidenceIds ?? [])],
+        ["evidence-frame-links", "Evidence frames", lines(fields.evidence.value)]
+      ];
+      for (const [containerId, label, evidenceIds] of fieldReferences) {
+        renderEvidenceLinks(document.getElementById(containerId), evidenceIds, { label, hideWhenEmpty: true });
+      }
+      renderEvidenceLinks(document.getElementById("editor-frame-links"), unique([
+        ...(proposal.evidenceIds ?? []),
+        ...fieldReferences.flatMap(([, , evidenceIds]) => evidenceIds)
+      ]), { label: "All referenced frames" });
+    }
+
+    function idsFromText(text, knownEvidenceIds = []) {
+      const source = String(text ?? "");
+      const exactKnownMatches = knownEvidenceIds.filter((id) => source.includes(id));
+      const tokenMatches = source.match(/\\b[a-z0-9][a-z0-9._:-]*-raw-frame\\b/gi) ?? [];
+      return unique([...exactKnownMatches, ...tokenMatches]);
+    }
+
+    function renderEvidenceLinks(container, evidenceIds, options = {}) {
       container.innerHTML = "";
+      const ids = unique(evidenceIds ?? []);
+      if (options.hideWhenEmpty && ids.length === 0) return;
       const label = document.createElement("span");
-      label.textContent = "Evidence: ";
+      label.textContent = (options.label ?? "Evidence") + ": ";
       container.appendChild(label);
-      if (evidenceIds.length === 0) {
+      if (ids.length === 0) {
         const empty = document.createElement("span");
         empty.textContent = "none";
         container.appendChild(empty);
         return;
       }
-      for (const evidenceId of evidenceIds) {
+      for (const evidenceId of ids) {
         const link = document.createElement("a");
         link.className = "evidence-link";
         link.href = rawFrameUrl(evidenceId);
         link.target = "_blank";
         link.rel = "noreferrer";
         link.textContent = evidenceId;
+        if (!state.rawFrameEvidenceIds.has(evidenceId)) {
+          link.title = "No retained raw screenshot found for this evidence ID.";
+          container.appendChild(link);
+          continue;
+        }
         const preview = document.createElement("span");
         preview.className = "frame-preview";
         const image = document.createElement("img");
@@ -701,6 +757,10 @@ function renderPage({ defaultDay }) {
 
     function rawFrameUrl(evidenceId) {
       return "/api/raw-frame?day=" + encodeURIComponent(dayInput.value) + "&evidenceId=" + encodeURIComponent(evidenceId);
+    }
+
+    function unique(values) {
+      return [...new Set(values.filter((value) => typeof value === "string" && value.trim() !== ""))];
     }
 
     function setStatus(message, warning = false) {

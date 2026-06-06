@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { loadMockObservations } from "./mockProvider.mjs";
 import {
   analyseObservationWithOllama,
   isLocalVisualProviderUnavailable
@@ -16,7 +15,7 @@ import {
   defaultExcludedDomains,
   observationExclusionReason
 } from "../privacy/exclusions.mjs";
-import { assertPrivacySafe, privacyRedactions } from "../privacy/safety.mjs";
+import { assertPrivacySafe } from "../privacy/safety.mjs";
 import { validateSkillProposalSet } from "../skills/proposals.mjs";
 
 const defaultOptions = {
@@ -24,12 +23,13 @@ const defaultOptions = {
   provider: "auto",
   limit: null,
   offset: 0,
+  slides: null,
   openai: false,
   openaiModel: null,
   reasoningEffort: "high",
   deleteRawMedia: false,
   env: process.env,
-  fetchImpl: globalThis.fetch,
+  fetchImpl: null,
   root: process.cwd()
 };
 
@@ -45,6 +45,13 @@ export async function runAnalysis(options = {}) {
   const limit = config.limit === null || config.limit === undefined || config.limit === ""
     ? null
     : validatePositiveInteger(config.limit, "limit");
+  const slideIndexes = config.slides === null || config.slides === undefined || config.slides === ""
+    ? null
+    : parseSlideGroups(config.slides);
+
+  if (slideIndexes && (limit !== null || offset !== 0)) {
+    throw new Error("--slides cannot be combined with --limit or --offset.");
+  }
 
   if (config.openai && !config.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is required when --openai is enabled.");
@@ -59,12 +66,12 @@ export async function runAnalysis(options = {}) {
       : null;
 
   const observationSource = loadObservations(config.root, day);
-  const structuredObservations = applyObservationChunk(
-    validateObservations(observationSource.observations, { day }),
-    { offset, limit }
-  );
+  const observations = validateObservations(observationSource.observations, { day });
+  const structuredObservations = slideIndexes
+    ? selectObservationSlides(observations, slideIndexes, day)
+    : applyObservationChunk(observations, { offset, limit });
   if (structuredObservations.length === 0) {
-    throw new Error(`No observations selected for ${day}; adjust --offset or --limit.`);
+    throw new Error(`No observations selected for ${day}; adjust --slides, --offset, or --limit.`);
   }
   enforceObservationExclusions(structuredObservations, {
     excludedApps: config.excludedApps ?? defaultExcludedApps,
@@ -81,7 +88,6 @@ export async function runAnalysis(options = {}) {
     day,
     model,
     provider,
-    source: observationSource.source,
     fetchImpl: config.fetchImpl,
     ollamaEndpoint: config.ollamaEndpoint ?? config.env.OLLAMA_HOST
   });
@@ -195,10 +201,10 @@ function loadObservations(root, day) {
   const captureFile = path.join(root, "storage", "captures", day, "observations.jsonl");
 
   if (!existsSync(captureFile)) {
-    return {
-      source: "fixture",
-      observations: loadMockObservations(root, day)
-    };
+    throw new Error(
+      `No captured observations found at ${captureFile}. ` +
+      "Run make capture or make capture-once for this day before analysis; mock fixture analysis is disabled."
+    );
   }
 
   const rows = readFileSync(captureFile, "utf8")
@@ -215,6 +221,52 @@ function loadObservations(root, day) {
     source: "capture",
     observations: rows
   };
+}
+
+function parseSlideGroups(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") throw new Error("--slides must include at least one slide number or range.");
+
+  const indexes = [];
+  const seen = new Set();
+  for (const rawGroup of text.split(",")) {
+    const group = rawGroup.trim();
+    if (group === "") throw new Error(`Invalid --slides group in "${text}".`);
+    const match = /^([1-9]\d*)(?:-([1-9]\d*))?$/.exec(group);
+    if (!match) {
+      throw new Error(`Invalid --slides group "${group}". Use 1-based numbers and ranges like 1-3,7,10-12.`);
+    }
+
+    const start = Number(match[1]);
+    const end = match[2] ? Number(match[2]) : start;
+    if (end < start) {
+      throw new Error(`Invalid --slides range "${group}": range end must be greater than or equal to start.`);
+    }
+
+    for (let slide = start; slide <= end; slide += 1) {
+      const index = slide - 1;
+      if (!seen.has(index)) {
+        seen.add(index);
+        indexes.push(index);
+      }
+    }
+  }
+
+  return indexes;
+}
+
+function selectObservationSlides(observations, slideIndexes, day) {
+  const selected = [];
+  for (const index of slideIndexes) {
+    const observation = observations[index];
+    if (!observation) {
+      throw new Error(
+        `Slide ${index + 1} is outside the ${observations.length} observation(s) available for ${day}.`
+      );
+    }
+    selected.push(observation);
+  }
+  return selected;
 }
 
 function enforceObservationExclusions(observations, { excludedApps, excludedDomains }) {
@@ -241,21 +293,9 @@ async function buildFrameAnalysis({
   day,
   model,
   provider,
-  source,
   fetchImpl,
   ollamaEndpoint
 }) {
-  if (provider === "mock") {
-    return {
-      frameAnalysis: observations.map((observation, index) => analyseObservationWithMock(observation, {
-        day,
-        evidenceNumber: index + 1,
-        model
-      })),
-      localProvider: "mock"
-    };
-  }
-
   try {
     const frameAnalysis = [];
     for (const [index, observation] of observations.entries()) {
@@ -275,65 +315,19 @@ async function buildFrameAnalysis({
       localProvider: "ollama"
     };
   } catch (error) {
-    if (provider === "auto" && source !== "capture" && isLocalVisualProviderUnavailable(error)) {
-      return {
-        frameAnalysis: observations.map((observation, index) => analyseObservationWithMock(observation, {
-          day,
-          evidenceNumber: index + 1,
-          model
-        })),
-        localProvider: "mock"
-      };
-    }
-
-    if (provider === "auto" && source === "capture" && isLocalVisualProviderUnavailable(error)) {
+    if (provider === "auto" && isLocalVisualProviderUnavailable(error)) {
       throw new Error(
         `${error.message} Real captured observations require a real local visual provider; ` +
-        `start Ollama with model ${model} or pass --provider mock explicitly for fixture-only testing.`
+        `start Ollama with model ${model}. Mock fixture analysis is disabled.`
       );
     }
 
     if (provider === "ollama" && isLocalVisualProviderUnavailable(error)) {
-      throw new Error(`${error.message} Use --provider mock for deterministic fixture analysis, or start Ollama with model ${model}.`);
+      throw new Error(`${error.message} Start Ollama with model ${model}. Mock fixture analysis is disabled.`);
     }
 
     throw error;
   }
-}
-
-function analyseObservationWithMock(observation, context) {
-  return {
-    schemaVersion: "frame-analysis.v1",
-    evidenceId: primaryScreenshotEvidenceId(observation, context),
-    frameId: observation.id,
-    day: context.day,
-    capturedAt: observation.capturedAt,
-    provider: "mock",
-    model: context.model,
-    surface: {
-      appName: observation.appName,
-      windowTitle: observation.windowTitle,
-      domain: observation.domain ?? null
-    },
-    activities: [observation.activity],
-    visibleIntent: summarizeIntent(observation),
-    keyTasks: inferFrameKeyTasks([
-      observation.activity,
-      observation.visibleTextSummary,
-      ...observation.redactedSignals
-    ].join(" ")),
-    evidence: observation.redactedSignals.map((signal, index) => ({
-      id: observation.evidenceIds[index] ?? `${observation.id}-signal-${String(index + 1).padStart(2, "0")}`,
-      kind: "redacted_visible_summary",
-      summary: signal
-    })),
-    redactions: privacyRedactions(),
-    riskFlags: []
-  };
-}
-
-function primaryScreenshotEvidenceId(observation, context) {
-  return observation.evidenceIds[0] ?? `${observation.id}-raw-frame-${String(context.evidenceNumber).padStart(3, "0")}`;
 }
 
 function buildWorkPatterns(activityTimeline, context) {
@@ -777,8 +771,8 @@ function validateNonEmpty(value, name) {
 
 function validateProvider(value) {
   const provider = validateNonEmpty(value, "provider");
-  if (!["auto", "mock", "ollama"].includes(provider)) {
-    throw new Error(`Invalid provider "${provider}". Expected auto, mock, or ollama.`);
+  if (!["auto", "ollama"].includes(provider)) {
+    throw new Error(`Invalid provider "${provider}". Expected auto or ollama. Mock fixture analysis is disabled.`);
   }
   return provider;
 }

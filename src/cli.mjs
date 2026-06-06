@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { debugFrameAnalysis } from "./analysis/debugFrame.mjs";
 import { evaluateOpenAIModels } from "./analysis/modelEvaluation.mjs";
 import { readAnalysisSummary, runAnalysis } from "./analysis/runAnalysis.mjs";
 import { buildTaskSkillSummary } from "./analysis/taskSkillSummary.mjs";
@@ -40,6 +42,7 @@ async function main(argv) {
       provider: flags.provider ?? process.env.LUCILLE_ANALYSIS_PROVIDER ?? "auto",
       limit: flags.limit,
       offset: flags.offset,
+      slides: flags.slides,
       openai: Boolean(flags.openai),
       openaiModel,
       reasoningEffort: flags.reasoningEffort ?? "high",
@@ -50,6 +53,9 @@ async function main(argv) {
     console.log(`Local provider: ${result.provider}. Model: ${model}.`);
     console.log(`Timeline segments: ${result.timelineSegmentCount}. Patterns: ${result.patternCount}. Skill proposals: ${result.proposalCount}.`);
     console.log(`Wrote ${path.relative(process.cwd(), result.analysisDir)}`);
+    if (flags.debugOutput) {
+      writeDebugJson(flags.debugOutput, buildDebugAnalysisOutput(result));
+    }
     return;
   }
 
@@ -67,6 +73,33 @@ async function main(argv) {
       console.log(`- ${model.model}: score ${model.score.total}, ok=${model.ok}`);
     }
     console.log(`Report: ${result.outputPath}`);
+    return;
+  }
+
+  if (command === "debug-frame") {
+    const flags = parseFlags([subcommand, ...rest].filter(Boolean));
+    const model = resolveLocalModel({ value: flags.model });
+    const result = await debugFrameAnalysis({
+      day: flags.day ?? today(),
+      model,
+      frameId: flags.frameId,
+      offset: flags.offset,
+      env: process.env
+    });
+
+    console.log(`Debugged one frame for ${result.day}.`);
+    console.log(`Model: ${result.model}. Provider: ${result.provider}.`);
+    console.log(`Frame: ${result.selected.frameId} at offset ${result.selected.index}.`);
+    console.log(`Evidence: ${result.selected.evidenceIds.join(", ")}`);
+    console.log(`Raw media: ${result.selected.rawMediaPath}`);
+    console.log(`Prompt source: ${result.promptSource}`);
+    console.log("\n--- Prompt ---");
+    console.log(result.prompt);
+    console.log("\n--- Normalized Frame Analysis ---");
+    console.log(JSON.stringify(result.frame, null, 2));
+    if (flags.debugOutput) {
+      writeDebugJson(flags.debugOutput, result);
+    }
     return;
   }
 
@@ -214,11 +247,50 @@ function parseFlags(argv) {
   return flags;
 }
 
+function writeDebugJson(outputPath, payload) {
+  const resolvedPath = path.resolve(process.cwd(), outputPath);
+  mkdirSync(path.dirname(resolvedPath), { recursive: true });
+  writeFileSync(resolvedPath, JSON.stringify(payload, null, 2) + "\n");
+  console.log(`Debug JSON: ${path.relative(process.cwd(), resolvedPath)}`);
+}
+
+function buildDebugAnalysisOutput(result) {
+  const analysisDir = result.analysisDir;
+  return {
+    schemaVersion: "debug-analysis.v1",
+    generatedAt: new Date().toISOString(),
+    result: {
+      ...result,
+      analysisDir: path.relative(process.cwd(), analysisDir)
+    },
+    artifacts: {
+      frameAnalysis: readJsonl(path.join(analysisDir, "frame-analysis.jsonl")),
+      activityTimeline: readJson(path.join(analysisDir, "activity-timeline.json")),
+      workPatterns: readJson(path.join(analysisDir, "work-patterns.json")),
+      skillProposals: readJson(path.join(analysisDir, "skill-proposals.json")),
+      taskSkillSummary: readJson(path.join(analysisDir, "task-skill-summary.json"))
+    }
+  };
+}
+
+function readJson(filePath) {
+  return JSON.parse(readFileSync(filePath, "utf8"));
+}
+
+function readJsonl(filePath) {
+  return readFileSync(filePath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 function printHelp() {
   console.log(`Lucille 3
 
 Usage:
-  lucille analyse [--day YYYY-MM-DD] [--model MODEL] [--provider auto|mock|ollama] [--limit N] [--offset N] [--delete-raw-media]
+  lucille analyse [--day YYYY-MM-DD] [--model MODEL] [--provider auto|ollama] [--limit N] [--offset N] [--slides 1-3,7,10-12] [--delete-raw-media] [--debug-output PATH]
+  lucille debug-frame [--day YYYY-MM-DD] [--frame-id OBS_OR_EVIDENCE_ID] [--offset N] [--model MODEL] [--debug-output PATH]
   lucille analyse --openai [--openai-model MODEL]
   lucille eval-models [--day YYYY-MM-DD] [--models MODEL[,MODEL...]] [--reasoning-effort high]
   lucille capture permission [--no-open-settings] [--no-request-access]
@@ -229,7 +301,7 @@ Usage:
   lucille export --day YYYY-MM-DD [--proposal-id skill-id] [--approve-export]
   lucille ui [--day YYYY-MM-DD] [--port 4173]
 
-Defaults are local-first and model names come from .env unless explicit flags are passed. The analyse command uses provider=auto: local Ollama for real captured observations with day-scoped raw media, and deterministic mock analysis only for fixture-backed runs without captured observations. Real captures fail clearly instead of silently falling back to mock if raw media or Ollama is unavailable. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
+Defaults are local-first and model names come from .env unless explicit flags are passed. The analyse command requires real captured observations with day-scoped raw media and a local Ollama visual provider; mock fixture analysis is disabled. If captured observations, raw media, or Ollama are unavailable, analysis fails clearly. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
 }
 
 function today() {

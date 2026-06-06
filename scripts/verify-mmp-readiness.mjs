@@ -137,6 +137,14 @@ function verifyFrames(frames, failures) {
     if (!Array.isArray(frame?.keyTasks) || frame.keyTasks.length === 0) {
       failures.push(`${source} does not draw out key tasks`);
     }
+    if (!Array.isArray(frame?.applications) || frame.applications.length === 0) {
+      failures.push(`${source} is missing visible applications`);
+    } else if (frame.applications.filter((application) => application?.isPrimary === true).length !== 1) {
+      failures.push(`${source} must identify exactly one primary application`);
+    }
+    if (!frame?.primaryApplication?.name) {
+      failures.push(`${source} is missing primaryApplication`);
+    }
   }
 }
 

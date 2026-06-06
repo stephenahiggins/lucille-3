@@ -5,6 +5,6 @@ dist/
 .env.*
 storage/
 output/
+debug/
 logs/ralf/*.log
 logs/ralf/*.tmp
-

@@ -114,6 +114,17 @@ export function buildEvidencePackage({ day, frames, activityTimeline = null, loc
       windowTitle: frame.surface.windowTitle,
       domain: frame.surface.domain
     },
+    applications: Array.isArray(frame.applications)
+      ? frame.applications.map((application) => ({
+        name: application.name,
+        windowTitle: application.windowTitle,
+        domain: application.domain,
+        isPrimary: application.isPrimary,
+        primaryReason: application.primaryReason
+      }))
+      : [],
+    visitedUrls: Array.isArray(frame.visitedUrls) ? frame.visitedUrls : [],
+    primaryApplication: frame.primaryApplication ?? null,
     activities: frame.activities,
     visibleIntent: frame.visibleIntent,
     keyTasks: frame.keyTasks,
