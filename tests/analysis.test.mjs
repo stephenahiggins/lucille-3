@@ -1161,6 +1161,179 @@ test("Ollama provider treats the Arbor data and AI communication window as Slack
   assert.equal(frame.primaryApplication.name, "Slack");
 });
 
+test("Ollama provider removes vague Discord duplicates from Slack workspace frames", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-slack-duplicate-001.png"), "local slack image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-slack-duplicate-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Slack",
+      windowTitle: "Engineering Slack",
+      domain: "slack.com",
+      activity: "communication_review",
+      visibleTextSummary: "A Slack workspace and code editor are visible.",
+      redactedSignals: ["slack workspace visible", "code editor visible"],
+      evidenceIds: ["obs-slack-duplicate-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "communication_review",
+          visibleIntent: "Reviewing code while monitoring Slack messages.",
+          applications: [
+            {
+              name: "Microsoft Teams",
+              windowTitle: "Teams",
+              domain: "teams.microsoft.com",
+              isPrimary: true,
+              primaryReason: "The cursor is over a Teams chat window."
+            },
+            {
+              name: "Visual Studio Code",
+              windowTitle: "Lucille project",
+              domain: null,
+              isPrimary: false,
+              primaryReason: "Cursor is over the code editor."
+            },
+            {
+              name: "Discord",
+              windowTitle: "Discord",
+              domain: "discord.com",
+              isPrimary: false,
+              primaryReason: "Discord window is visible but not the primary focus."
+            },
+            {
+              name: "Slack",
+              windowTitle: "Engineering Slack",
+              domain: "slack.com",
+              isPrimary: false,
+              primaryReason: "Slack window is visible but not the primary focus."
+            }
+          ],
+          primaryApplication: {
+            name: "Microsoft Teams",
+            windowTitle: "Teams",
+            domain: "teams.microsoft.com",
+            primaryReason: "The cursor is over a Teams chat window."
+          },
+          visitedUrls: ["https://discord.com/"],
+          keyTasks: ["reviewing Discord messages", "Draft or review follow-up communication"],
+          evidenceSummaries: [
+            "Discord window shows communication activity.",
+            "Slack workspace is visible."
+          ],
+          riskFlags: ["The presence of ongoing communication in Slack and Discord could indicate a need for coordination."]
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), [
+    "Slack",
+    "Visual Studio Code"
+  ]);
+  assert.equal(frame.primaryApplication.name, "Slack");
+  assert.equal(frame.applications.filter((application) => application.isPrimary).length, 1);
+  assert.deepEqual(frame.visitedUrls, []);
+  assert.doesNotMatch(JSON.stringify(frame), /discord/i);
+});
+
+test("Ollama provider treats ambiguous Discord and Teams chat mix as Slack when no browser is present", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-slack-ambiguous-001.png"), "local slack image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-slack-ambiguous-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null,
+      activity: "communication_review",
+      visibleTextSummary: "A communication workspace is visible.",
+      redactedSignals: ["communication workspace visible", "code review visible"],
+      evidenceIds: ["obs-slack-ambiguous-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "communication_review",
+          visibleIntent: "Reviewing a chat thread about code review.",
+          applications: [
+            {
+              name: "Microsoft Teams",
+              windowTitle: "Microsoft Teams",
+              domain: null,
+              isPrimary: true,
+              primaryReason: "Microsoft Teams window is active and in focus."
+            },
+            {
+              name: "Discord",
+              windowTitle: "Discord",
+              domain: null,
+              isPrimary: false,
+              primaryReason: "Discord window is visible but not the primary focus."
+            }
+          ],
+          primaryApplication: {
+            name: "Microsoft Teams",
+            windowTitle: "Microsoft Teams",
+            domain: null,
+            primaryReason: "Microsoft Teams window is active and in focus."
+          },
+          visitedUrls: ["https://teams.microsoft.com/"],
+          keyTasks: ["reviewing Microsoft Teams chat", "reviewing Discord messages"],
+          evidenceSummaries: ["The user is reviewing code in a Microsoft Teams chat window."],
+          riskFlags: ["Discord and Microsoft Teams are open."]
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Slack"]);
+  assert.equal(frame.primaryApplication.name, "Slack");
+  assert.deepEqual(frame.visitedUrls, []);
+  assert.doesNotMatch(JSON.stringify(frame), /discord|teams/i);
+});
+
 test("Ollama provider extracts browser visited URLs and strips private URL parts", async () => {
   const root = fixtureRoot();
   const captureDir = path.join(root, "storage", "captures", "2026-05-30");

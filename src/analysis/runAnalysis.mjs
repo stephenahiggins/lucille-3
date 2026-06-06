@@ -470,61 +470,181 @@ function frameCachePathForVersion({ root, day, model, observation, promptVersion
 }
 
 function normalizeCachedFrame(frame) {
-  const applications = Array.isArray(frame.applications)
+  const rawApplications = Array.isArray(frame.applications)
     ? frame.applications.map((application) => {
-      const text = `${application.name ?? ""} ${application.windowTitle ?? ""} ${application.domain ?? ""}`.toLowerCase();
+      const text = applicationSlackDiscordCueText(application);
       if (application.name === "Discord" && /\barbor\b/.test(text)) {
         return {
           ...application,
           name: "Slack",
           domain: "arbor-data-and-ai.slack.com",
-          primaryReason: replaceDiscordWithSlack(application.primaryReason)
+          primaryReason: replaceCommunicationAppWithSlack(application.primaryReason)
         };
       }
       return {
         ...application,
         primaryReason: application.name === "Slack"
-          ? replaceDiscordWithSlack(application.primaryReason)
+          ? replaceCommunicationAppWithSlack(application.primaryReason)
           : application.primaryReason
       };
     })
     : [];
+  let applications = normalizeCachedSlackDominantCommunicationMix(rawApplications);
   const hasSlack = applications.some((application) => application.name === "Slack");
   const hasDiscord = applications.some((application) => application.name === "Discord");
-  const primaryApplication = frame.primaryApplication?.name === "Discord" && /\barbor\b/i.test(`${frame.primaryApplication.windowTitle ?? ""} ${frame.primaryApplication.domain ?? ""}`)
-    ? {
-      ...frame.primaryApplication,
-      name: "Slack",
-      domain: "arbor-data-and-ai.slack.com",
-      primaryReason: replaceDiscordWithSlack(frame.primaryApplication.primaryReason)
-    }
-    : frame.primaryApplication?.name === "Slack"
-      ? {
-        ...frame.primaryApplication,
-        primaryReason: replaceDiscordWithSlack(frame.primaryApplication.primaryReason)
-      }
-      : frame.primaryApplication;
+  const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
+  const shouldCleanSlackText = hasSlack && !hasDiscord && !hasTeams;
+  const primaryApplication = normalizeCachedPrimaryApplication(frame.primaryApplication, applications);
+  applications = ensureCachedSinglePrimary(applications, primaryApplication);
 
   return {
     ...frame,
     applications,
     primaryApplication,
     visitedUrls: Array.isArray(frame.visitedUrls)
-      ? frame.visitedUrls.filter(isPlausibleVisitedUrl)
+      ? frame.visitedUrls.filter(isPlausibleVisitedUrl).filter((url) => isVisitedUrlConsistentWithApplications(url, applications))
       : [],
-    keyTasks: hasSlack && !hasDiscord && Array.isArray(frame.keyTasks)
-      ? frame.keyTasks.map(replaceDiscordWithSlack)
+    keyTasks: shouldCleanSlackText && Array.isArray(frame.keyTasks)
+      ? frame.keyTasks.map(replaceCommunicationAppWithSlack)
       : frame.keyTasks,
-    evidence: hasSlack && !hasDiscord && Array.isArray(frame.evidence)
+    evidence: shouldCleanSlackText && Array.isArray(frame.evidence)
       ? frame.evidence.map((item) => ({
         ...item,
-        summary: replaceDiscordWithSlack(item.summary)
+        summary: replaceCommunicationAppWithSlack(item.summary)
       }))
       : frame.evidence,
-    riskFlags: hasSlack && !hasDiscord && Array.isArray(frame.riskFlags)
-      ? frame.riskFlags.map(replaceDiscordWithSlack)
+    riskFlags: shouldCleanSlackText && Array.isArray(frame.riskFlags)
+      ? frame.riskFlags.map(replaceCommunicationAppWithSlack)
       : frame.riskFlags
   };
+}
+
+function ensureCachedSinglePrimary(applications, primaryApplication) {
+  if (applications.length === 0) return applications;
+  let primaryIndex = primaryApplication
+    ? applications.findIndex((application) => (
+      application.name === primaryApplication.name &&
+      (
+        !primaryApplication.windowTitle ||
+        !application.windowTitle ||
+        application.windowTitle === primaryApplication.windowTitle
+      )
+    ))
+    : -1;
+  if (primaryIndex === -1) {
+    primaryIndex = applications.findIndex((application) => application.isPrimary);
+  }
+  if (primaryIndex === -1) primaryIndex = 0;
+  return applications.map((application, index) => ({
+    ...application,
+    isPrimary: index === primaryIndex
+  }));
+}
+
+function normalizeCachedPrimaryApplication(primaryApplication, applications) {
+  if (!primaryApplication) return primaryApplication;
+  const primaryFromApplications = applications.find((application) => application.isPrimary);
+  if (
+    primaryFromApplications &&
+    (primaryApplication.name === "Discord" || primaryApplication.name === "Microsoft Teams") &&
+    primaryFromApplications.name === "Slack"
+  ) {
+    return {
+      name: primaryFromApplications.name,
+      windowTitle: primaryFromApplications.windowTitle,
+      domain: primaryFromApplications.domain,
+      primaryReason: replaceCommunicationAppWithSlack(primaryFromApplications.primaryReason)
+    };
+  }
+  return primaryApplication.name === "Discord" && /\barbor\b/i.test(`${primaryApplication.windowTitle ?? ""} ${primaryApplication.domain ?? ""}`)
+    ? {
+      ...primaryApplication,
+      name: "Slack",
+      domain: "arbor-data-and-ai.slack.com",
+      primaryReason: replaceCommunicationAppWithSlack(primaryApplication.primaryReason)
+    }
+    : primaryApplication.name === "Slack"
+      ? {
+        ...primaryApplication,
+        primaryReason: replaceCommunicationAppWithSlack(primaryApplication.primaryReason)
+      }
+      : primaryApplication;
+}
+
+function normalizeCachedSlackDominantCommunicationMix(applications) {
+  const hasSlack = applications.some((application) => application.name === "Slack");
+  const hasDiscord = applications.some((application) => application.name === "Discord");
+  const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
+  const hasBrowser = applications.some((application) => /\b(browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium)\b/i.test(String(application.name ?? "")));
+  if (!hasSlack && !(hasDiscord && hasTeams && !hasBrowser)) return dedupeCachedApplications(applications);
+  const slackCueText = applications.map(applicationSlackDiscordCueText).join(" ");
+  const hasStrongSlackCue = (
+    /\bslack\b/.test(slackCueText) ||
+    /\bslack\.com\b/.test(slackCueText) ||
+    /\bpurple workspace sidebar\b/.test(slackCueText) ||
+    /\bworkspace sidebar\b/.test(slackCueText) ||
+    /\b(arbor-data-and-ai|engineering slack)\b/.test(slackCueText)
+  );
+  const hasAmbiguousMixedChatHallucination = !hasSlack && hasDiscord && hasTeams && !hasBrowser;
+  if (!hasStrongSlackCue && !hasAmbiguousMixedChatHallucination) return dedupeCachedApplications(applications);
+  if (applications.some((application) => application.name === "Discord" && application.isPrimary && hasSpecificDiscordCue(application))) {
+    return dedupeCachedApplications(applications);
+  }
+
+  const normalized = applications.map((application) => {
+    if (application.name !== "Discord" && application.name !== "Microsoft Teams") return application;
+    if (application.name === "Discord" && application.isPrimary && hasSpecificDiscordCue(application)) return application;
+    return {
+      ...application,
+      name: "Slack",
+      windowTitle: replaceCommunicationAppWithSlack(application.windowTitle),
+      domain: application.domain?.includes("slack.com") ? application.domain : "slack.com",
+      primaryReason: replaceCommunicationAppWithSlack(application.primaryReason)
+    };
+  });
+  return dedupeCachedApplications(normalized);
+}
+
+function applicationSlackDiscordCueText(application) {
+  return `${application?.name ?? ""} ${application?.windowTitle ?? ""} ${application?.domain ?? ""} ${application?.primaryReason ?? ""}`.toLowerCase();
+}
+
+function hasSpecificDiscordCue(application) {
+  const text = applicationSlackDiscordCueText(application);
+  return (
+    /\b(discordapp\.com|discord\.gg|server icon|voice channel|voice controls|discord branding)\b/.test(text) ||
+    /\bcursor\b.*\bdiscord\b/.test(text) ||
+    /\bdiscord\b.*\bcursor\b/.test(text)
+  );
+}
+
+function dedupeCachedApplications(applications) {
+  const seen = new Set();
+  const deduped = [];
+  for (const application of applications) {
+    const key = application.name === "Slack"
+      ? `${application.name.toLowerCase()}|${application.domain ?? "slack.com"}`
+      : `${application.name?.toLowerCase() ?? ""}|${application.windowTitle?.toLowerCase() ?? ""}|${application.domain ?? ""}`;
+    if (seen.has(key)) {
+      const existing = deduped.find((item) => (
+        (item.name === "Slack" && application.name === "Slack" && (item.domain ?? "slack.com") === (application.domain ?? "slack.com")) ||
+        (
+          item.name === application.name &&
+          (item.windowTitle ?? "") === (application.windowTitle ?? "") &&
+          (item.domain ?? "") === (application.domain ?? "")
+        )
+      ));
+      if (existing?.isPrimary === false && application.isPrimary) {
+        existing.isPrimary = true;
+        existing.primaryReason = application.primaryReason;
+        existing.windowTitle = application.windowTitle ?? existing.windowTitle;
+      }
+      continue;
+    }
+    seen.add(key);
+    deduped.push(application);
+  }
+  return deduped;
 }
 
 function isPlausibleVisitedUrl(value) {
@@ -546,13 +666,46 @@ function isPlausibleVisitedUrl(value) {
   }
 }
 
-function replaceDiscordWithSlack(text) {
-  if (typeof text !== "string") return text;
+function isVisitedUrlConsistentWithApplications(value, applications) {
+  let hostname = "";
+  try {
+    hostname = new URL(value).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const hasSlack = applications.some((application) => application.name === "Slack");
+  const hasDiscord = applications.some((application) => application.name === "Discord");
+  const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
+  const hasBrowserOnHostname = applications.some((application) => (
+    /\b(browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium)\b/i.test(String(application.name ?? "")) &&
+    typeof application.domain === "string" &&
+    (application.domain.toLowerCase() === hostname || application.domain.toLowerCase().endsWith(`.${hostname}`))
+  ));
+
+  if ((hostname === "discord.com" || hostname.endsWith(".discord.com")) && !hasDiscord && !hasBrowserOnHostname) return false;
+  if ((hostname === "slack.com" || hostname.endsWith(".slack.com")) && !hasSlack && !hasBrowserOnHostname) return false;
+  if ((hostname === "teams.microsoft.com" || hostname.endsWith(".teams.microsoft.com")) && !hasTeams && !hasBrowserOnHostname) return false;
+  return true;
+}
+
+function replaceCommunicationAppWithSlack(text) {
+  if (typeof text !== "string" || !/\b(discord|microsoft teams|teams)\b/i.test(text)) return text;
   return text
     .replace(/\bDiscord window\b/gi, "Slack window")
     .replace(/\bDiscord channel\b/gi, "Slack channel")
+    .replace(/\bDiscord server\b/gi, "Slack workspace")
+    .replace(/\bDiscord messages\b/gi, "Slack messages")
+    .replace(/\bDiscord branding and server\/channel layout\b/gi, "Slack workspace layout")
+    .replace(/\bMicrosoft Teams window\b/gi, "Slack window")
+    .replace(/\bTeams chat window\b/gi, "Slack window")
+    .replace(/\bTeams chat\b/gi, "Slack conversation")
+    .replace(/\bMicrosoft Teams\b/g, "Slack")
+    .replace(/\bTeams\b/g, "Slack")
+    .replace(/\bteams\b/g, "Slack")
     .replace(/\bDiscord\b/g, "Slack")
-    .replace(/\bdiscord\b/g, "Slack");
+    .replace(/\bdiscord\b/g, "Slack")
+    .replace(/\bSlack and Slack are\b/g, "Slack is")
+    .replace(/\bSlack and Slack\b/g, "Slack");
 }
 
 function buildWorkPatterns(activityTimeline, context) {
