@@ -272,7 +272,7 @@ test("runAnalysis normalizes generic cached import metadata as a blank frame", a
     day,
     "frame-cache",
     "moondream-1-8b",
-    "frame-analysis-visual-app-url-memory-512-2026-06-06"
+    "frame-analysis-visual-app-url-memory-1536-primary-url-2026-06-06"
   );
   mkdirSync(cacheDir, { recursive: true });
   const frame = {
@@ -324,7 +324,7 @@ test("runAnalysis normalizes generic cached import metadata as a blank frame", a
   };
   writeFileSync(path.join(cacheDir, `${observation.id}.json`), JSON.stringify({
     schemaVersion: "frame-analysis-cache.v1",
-    promptVersion: "frame-analysis-visual-app-url-memory-512-2026-06-06",
+    promptVersion: "frame-analysis-visual-app-url-memory-1536-primary-url-2026-06-06",
     provider: "ollama",
     model: "moondream:1.8b",
     day,
@@ -1692,6 +1692,188 @@ test("Ollama provider extracts browser visited URLs and strips private URL parts
   assert.equal(frame.applications[2].domain, null);
   assert.doesNotMatch(JSON.stringify(frame), /token=|utm_source|notification_referrer_id|#/);
   assert.doesNotThrow(() => assertPrivacySafe(frame, "browserFrame"));
+});
+
+test("Ollama provider rewrites generic capture intent from visible app evidence", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-work-summary-001.png"), "local Slack screenshot");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-work-summary-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null,
+      activity: "archived_screen_capture",
+      visibleTextSummary: "A visible screen frame was imported from the Downloads Archive for local Lucille analysis.",
+      redactedSignals: ["day-scoped local raw media"],
+      evidenceIds: ["obs-work-summary-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "archived_screen_capture",
+          visibleIntent: "analyzing a local screen capture",
+          applications: [
+            {
+              name: "Slack",
+              windowTitle: "Direct messages",
+              domain: "slack.com",
+              isPrimary: true,
+              primaryReason: "Slack is the foreground window under the cursor."
+            },
+            {
+              name: "GitHub",
+              windowTitle: "Pull request",
+              domain: "github.com/org/repo/pull/3606",
+              isPrimary: false,
+              primaryReason: "A GitHub pull request is visible behind Slack."
+            }
+          ],
+          primaryApplication: {
+            name: "Slack",
+            windowTitle: "Direct messages",
+            domain: "slack.com",
+            primaryReason: "Slack is the foreground window under the cursor."
+          },
+          visitedUrls: ["https://github.com/org/repo/pull/3606"],
+          keyTasks: ["Draft or review follow-up communication"],
+          evidenceSummaries: [
+            "Slack message from Jane Smith says the project is delayed.",
+            "A GitHub pull request is visible in a browser behind Slack.",
+            "Visual Studio Code shows code snippets for the same task."
+          ],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.equal(frame.visibleIntent, "Draft or review follow-up communication in Slack with GitHub also visible.");
+  assert.deepEqual(frame.activities, ["team_communication"]);
+  assert.deepEqual(frame.evidence.map((item) => item.summary), [
+    "A communication app is visible with team collaboration context; message text and personal names are not stored.",
+    "A code review or pull request surface is visible for engineering coordination.",
+    "A code editor is visible with engineering work in progress."
+  ]);
+  assert.doesNotMatch(JSON.stringify(frame), /analyzing a local screen capture|archived_screen_capture/i);
+  assert.doesNotMatch(JSON.stringify(frame), /Jane Smith|project is delayed|code snippets/i);
+});
+
+test("Ollama provider drops GitLab hallucination from local Git tooling", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-git-tooling-001.png"), "local VS Code git screenshot");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-git-tooling-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null,
+      activity: "archived_screen_capture",
+      visibleTextSummary: "A visible screen frame was imported from the Downloads Archive for local Lucille analysis.",
+      redactedSignals: ["day-scoped local raw media"],
+      evidenceIds: ["obs-git-tooling-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "code review",
+          visibleIntent: "code review and development",
+          applications: [
+            {
+              name: "Visual Studio Code",
+              windowTitle: "SmartReportTemplateBuilder.tsx",
+              domain: null,
+              isPrimary: true,
+              primaryReason: "Foreground editor is active."
+            },
+            {
+              name: "GitLens",
+              windowTitle: "GitLens",
+              domain: "localhost",
+              isPrimary: false,
+              primaryReason: "GitLens controls are visible in VS Code."
+            },
+            {
+              name: "GitLab",
+              windowTitle: "arbor-fe-library",
+              domain: "gitlab.com",
+              isPrimary: false,
+              primaryReason: "Branches and commits visible in the right panel."
+            },
+            {
+              name: "Terminal",
+              windowTitle: "zsh",
+              domain: null,
+              isPrimary: false,
+              primaryReason: "Terminal is visible below the editor."
+            }
+          ],
+          primaryApplication: {
+            name: "Visual Studio Code",
+            windowTitle: "SmartReportTemplateBuilder.tsx",
+            domain: null,
+            primaryReason: "Foreground editor is active."
+          },
+          visitedUrls: ["https://gitlab.com/arbor-education/arbor-fe-library"],
+          keyTasks: ["working with GitLab", "executing Git commands"],
+          evidenceSummaries: [
+            "The GitLab interface shows a list of branches and commits.",
+            "The Terminal window shows Git commands being executed."
+          ],
+          riskFlags: ["The user is working with GitLab."]
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), [
+    "Visual Studio Code",
+    "GitLens",
+    "Terminal"
+  ]);
+  assert.deepEqual(frame.visitedUrls, []);
+  assert.doesNotMatch(JSON.stringify(frame), /GitLab|gitlab\\.com/);
+  assert.match(JSON.stringify(frame), /version control/);
 });
 
 test("debugFrameAnalysis analyses one frame and exposes the prompt without writing artifacts", async () => {

@@ -11,6 +11,7 @@ import { buildTaskSkillSummaryFromArtifacts } from "./taskSkillSummary.mjs";
 import { updateUserMemory } from "./userMemory.mjs";
 import { buildOptimizationWrapUp } from "./wrapUp.mjs";
 import { validateObservations } from "./observations.mjs";
+import { normalizeFrameWorkSummary } from "./frameWorkSummary.mjs";
 import { applyRawMediaLifecycle } from "../capture/rawMediaLifecycle.mjs";
 import { resolveLocalModel, resolveOpenAIModel } from "../config/models.mjs";
 import {
@@ -37,12 +38,9 @@ const defaultOptions = {
   onFrameProgress: null
 };
 const frameCacheVersion = "frame-analysis-cache.v1";
-const framePromptVersion = "frame-analysis-visual-app-url-memory-512-2026-06-06";
+const framePromptVersion = "frame-analysis-visual-app-url-memory-1536-primary-url-2026-06-06";
 const legacyFramePromptVersions = [
-  "frame-analysis-visual-app-url-memory-768-2026-06-06",
-  "frame-analysis-visual-app-url-memory-1024-2026-06-06",
-  "frame-analysis-visual-app-url-memory-1536-2026-06-06",
-  "frame-analysis-visual-app-url-memory-2026-06-06"
+  "frame-analysis-visual-app-url-memory-1536-2026-06-06"
 ];
 
 export async function runAnalysis(options = {}) {
@@ -487,6 +485,7 @@ function normalizeCachedFrame(frame) {
       }
       return {
         ...application,
+        domain: application.name === "GitHub" ? "github.com" : application.domain,
         primaryReason: application.name === "Slack"
           ? replaceCommunicationAppWithSlack(application.primaryReason)
           : application.primaryReason
@@ -511,7 +510,7 @@ function normalizeCachedFrame(frame) {
     return normalized;
   };
 
-  return {
+  return normalizeFrameWorkSummary({
     ...frame,
     applications,
     primaryApplication,
@@ -528,7 +527,7 @@ function normalizeCachedFrame(frame) {
     riskFlags: (shouldCleanSlackText || shouldCleanCalendarText) && Array.isArray(frame.riskFlags)
       ? frame.riskFlags.map(normalizeCachedText)
       : frame.riskFlags
-  };
+  });
 }
 
 function isGenericUnknownCachedFrame(frame) {
@@ -663,6 +662,11 @@ function normalizeCachedPrimaryApplication(primaryApplication, applications) {
       domain: "arbor-data-and-ai.slack.com",
       primaryReason: replaceCommunicationAppWithSlack(primaryApplication.primaryReason)
     }
+    : primaryApplication.name === "GitHub"
+      ? {
+        ...primaryApplication,
+        domain: "github.com"
+      }
     : primaryApplication.name === "Slack"
       ? {
         ...primaryApplication,

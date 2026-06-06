@@ -4,10 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { resolveLocalModel } from "../config/models.mjs";
 import { assertPrivacySafe, privacyRedactions } from "../privacy/safety.mjs";
+import { normalizeFrameWorkSummary } from "./frameWorkSummary.mjs";
 
 const defaultEndpoint = "http://127.0.0.1:11434";
 const imageExtensions = [".png", ".jpg", ".jpeg", ".webp"];
-const maxModelImageDimension = 512;
+const maxModelImageDimension = 1536;
 const modelRequestTimeoutMs = 120_000;
 
 export class LocalVisualProviderUnavailable extends Error {
@@ -143,14 +144,14 @@ function imageDimensions(mediaPath) {
 
 export function buildOllamaPrompt({ observation }) {
   return [
-    "Analyze this locally supplied visible screen frame for Lucille 3.",
+    "Analyze this locally supplied visible screen frame for Lucille 3. The image is provided at high enough resolution for desktop OCR; inspect foreground windows, browser address bars, and visible app branding carefully.",
     "Return JSON only with keys: activity, visibleIntent, applications, primaryApplication, visitedUrls, keyTasks, evidenceSummaries, riskFlags.",
     "applications must be an array of every visible or inferable running application/work surface in the frame. Each item should include name, windowTitle when visible, domain when visible as a hostname only, isPrimary, and primaryReason.",
     "Whenever a web browser window or browser-based app is visible, OCR the address bar and include visitedUrls as an array of visible visited URLs. Preserve hostnames and visible paths, but remove query strings, fragments, usernames, passwords, tokens, cookies, and tracking parameters. If only the hostname is visible, include the hostname as an https URL.",
     "Differentiate communication apps precisely: Discord, Slack, and Microsoft Teams are separate applications. Use visible branding, domains, sidebar labels, and window titles; do not call Discord Slack or Teams, do not call Slack Discord or Teams, and use Microsoft Teams for Teams work/chat windows.",
     "Slack visual cues include a purple workspace sidebar, workspace switcher, channel names prefixed with #, and left rail labels like Home, DMs, Activity, Later, More. If those Slack cues are visible, label the app Slack even when the channel or workspace name resembles a community/server name.",
     "Discord visual cues include server icons, Discord server/channel layout, voice channel controls, and Discord branding; do not infer Discord from a #channel name alone. Microsoft Teams visual cues include Teams/Chat/Calendar/Calls navigation, tenant/team lists, and teams.microsoft.com.",
-    "Use the mouse cursor position to decide primaryApplication when the cursor is visible. The primary application is the application currently in use: the app/window under or nearest the cursor, or the focused active window if the cursor is not visible. Say when the cursor is not visible instead of inventing cursor evidence.",
+    "Use the mouse cursor position and foreground window stacking to decide primaryApplication when the cursor is visible. The primary application is the application currently in use: the app/window under or nearest the cursor, then the frontmost focused window if the cursor is not visible. Say when the cursor is not visible instead of inventing cursor evidence.",
     "keyTasks must be 1-6 short task labels that describe what work the user is visibly doing, such as reviewing a report, reconciling evidence, drafting follow-up, troubleshooting command output, or reviewing code.",
     "Use concise redacted summaries that name visible applications, pages, documents, UI state, console output categories, and short bounded visible text snippets.",
     "Prefer evidence summaries that explain the user's likely action, visible intent, unresolved errors, repeated attempts, or review burden.",
@@ -218,7 +219,7 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     observation
   }).filter((url) => isVisitedUrlConsistentWithApplications(url, applications));
 
-  return {
+  return normalizeFrameWorkSummary({
     schemaVersion: "frame-analysis.v1",
     evidenceId: primaryScreenshotEvidenceId(observation, evidenceNumber),
     frameId: observation.id,
@@ -249,7 +250,7 @@ function normalizeOllamaFrame({ parsed, observation, day, evidenceNumber, model 
     })),
     redactions: privacyRedactions(),
     riskFlags
-  };
+  });
 }
 
 function normalizeApplications({ parsedApplications, parsedPrimaryApplication, observation }) {
@@ -676,6 +677,9 @@ function normalizeApplicationDomain({ name, windowTitle = null, domain = null })
     return lowerDomain.includes("teams.microsoft.com") || lowerDomain.includes("teams.live.com")
       ? lowerDomain
       : "teams.microsoft.com";
+  }
+  if (name === "GitHub") {
+    return "github.com";
   }
   if (["finder", "terminal", "iterm2", "visual studio code", "cursor"].includes(lowerName)) {
     return null;
