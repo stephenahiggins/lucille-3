@@ -356,6 +356,103 @@ test("runAnalysis normalizes generic cached import metadata as a blank frame", a
   assert.doesNotMatch(JSON.stringify(analysedFrame), /Downloads Archive|structured metadata|raw media/i);
 });
 
+test("runAnalysis drops implausible app-derived cached URLs", async () => {
+  const root = fixtureRoot();
+  const day = "2026-05-30";
+  const observation = readFileSync(path.join(root, "storage", "captures", day, "observations.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+  const cacheDir = path.join(
+    root,
+    "storage",
+    "analysis",
+    day,
+    "frame-cache",
+    "moondream-1-8b",
+    "frame-analysis-visual-app-url-memory-1536-primary-url-2026-06-06"
+  );
+  mkdirSync(cacheDir, { recursive: true });
+  const frame = {
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: observation.evidenceIds[0],
+    frameId: observation.id,
+    day,
+    capturedAt: observation.capturedAt,
+    provider: "ollama",
+    model: "moondream:1.8b",
+    surface: {
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null
+    },
+    applications: [
+      {
+        name: "Browser",
+        windowTitle: "Canvas",
+        domain: "canvas",
+        isPrimary: true,
+        primaryReason: "Browser surface is visible."
+      },
+      {
+        name: "GitHub",
+        windowTitle: "Pull request",
+        domain: "github.com",
+        isPrimary: false,
+        primaryReason: "GitHub pull request is visible."
+      }
+    ],
+    visitedUrls: ["https://canvas/"],
+    primaryApplication: {
+      name: "Browser",
+      windowTitle: "Canvas",
+      domain: "canvas",
+      primaryReason: "Browser surface is visible."
+    },
+    activities: ["browser_review"],
+    visibleIntent: "Reviewing a browser report page.",
+    keyTasks: ["Review report or dashboard state"],
+    evidence: [
+      {
+        id: observation.evidenceIds[0],
+        kind: "local_visual_summary",
+        summary: "A browser tab is visible."
+      }
+    ],
+    redactions: ["no_keystrokes", "no_clipboard_capture", "no_audio_capture", "no_raw_document_bodies", "no_raw_message_bodies", "query_strings_removed"],
+    riskFlags: []
+  };
+  writeFileSync(path.join(cacheDir, `${observation.id}.json`), JSON.stringify({
+    schemaVersion: "frame-analysis-cache.v1",
+    promptVersion: "frame-analysis-visual-app-url-memory-1536-primary-url-2026-06-06",
+    provider: "ollama",
+    model: "moondream:1.8b",
+    day,
+    frameId: observation.id,
+    evidenceId: observation.evidenceIds[0],
+    cachedAt: "2026-06-06T00:00:00.000Z",
+    frame
+  }, null, 2) + "\n");
+
+  await runAnalysis({
+    root,
+    day,
+    model: "moondream:1.8b",
+    slides: "1",
+    fetchImpl: async () => {
+      throw new Error("provider should not be called for cached frame");
+    }
+  });
+
+  const analysedFrame = readFileSync(path.join(root, "storage", "analysis", day, "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(analysedFrame.visitedUrls, ["https://github.com/"]);
+  assert.doesNotMatch(JSON.stringify(analysedFrame.visitedUrls), /canvas/);
+});
+
 test("MMP readiness verifier rejects stale task-skill summaries", async () => {
   const root = fixtureRoot();
   await runAnalysis({
@@ -2031,7 +2128,12 @@ test("Ollama provider names browser surfaces from visible hostnames", async () =
             domain: null,
             primaryReason: "Slack is the focused foreground window."
           },
-          visitedUrls: ["https://www.linkedin.com/feed/", "https://github.com/org/repo/pull/1"],
+          visitedUrls: [
+            "https://www.linkedin.com/feed/",
+            "https://github.com/org/repo/pull/1",
+            "https://arbor.com/",
+            "https://canvas.com/"
+          ],
           keyTasks: ["Review engineering work and code context"],
           evidenceSummaries: [
             "Slack workspace is visible.",

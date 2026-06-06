@@ -584,6 +584,7 @@ function normalizeCachedVisitedUrls(visitedUrls, applications) {
     if (url) urls.push(url);
   }
   return unique(urls)
+    .filter(isPlausibleVisitedUrl)
     .filter((url) => isVisitedUrlConsistentWithApplications(url, applications))
     .slice(0, 12);
 }

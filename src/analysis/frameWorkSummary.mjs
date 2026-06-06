@@ -18,10 +18,10 @@ export function normalizeFrameWorkSummary(frame) {
     ...frame,
     applications,
     primaryApplication,
-    visitedUrls: normalizeVisitedUrlsForRepositoryHostCleanup(
+    visitedUrls: normalizeVisitedUrlsForKnownHallucinations(normalizeVisitedUrlsForRepositoryHostCleanup(
       normalizeVisitedUrlsForCalendarTeamsCleanup(frame.visitedUrls, calendarTeamsCleanup),
       repositoryHostCleanup
-    )
+    ))
   };
   if (isGenericVisibleIntent(frame.visibleIntent)) {
     normalized.visibleIntent = buildVisibleIntent({ frame, primaryApplication, applications });
@@ -152,6 +152,18 @@ function normalizeVisitedUrlsForCalendarTeamsCleanup(visitedUrls, cleanup) {
     try {
       const hostname = new URL(url).hostname.toLowerCase();
       return hostname !== "teams.microsoft.com" && !hostname.endsWith(".teams.microsoft.com");
+    } catch {
+      return true;
+    }
+  });
+}
+
+function normalizeVisitedUrlsForKnownHallucinations(visitedUrls) {
+  if (!Array.isArray(visitedUrls)) return visitedUrls;
+  return visitedUrls.filter((url) => {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return hostname !== "arbor.com" && hostname !== "canvas.com";
     } catch {
       return true;
     }
