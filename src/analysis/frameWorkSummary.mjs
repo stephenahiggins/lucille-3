@@ -49,6 +49,15 @@ export function normalizeFrameWorkSummary(frame) {
       ? (normalized.riskFlags ?? frame.riskFlags).map(normalizeCalendarTeamsText)
       : normalized.riskFlags ?? frame.riskFlags;
   }
+  if (hasSlackWithoutTeams(applications)) {
+    normalized.visibleIntent = normalizeCommunicationTextToSlack(normalized.visibleIntent);
+    normalized.keyTasks = Array.isArray(normalized.keyTasks ?? frame.keyTasks)
+      ? (normalized.keyTasks ?? frame.keyTasks).map(normalizeCommunicationTextToSlack)
+      : normalized.keyTasks ?? frame.keyTasks;
+    normalized.riskFlags = Array.isArray(normalized.riskFlags ?? frame.riskFlags)
+      ? (normalized.riskFlags ?? frame.riskFlags).map(normalizeCommunicationTextToSlack)
+      : normalized.riskFlags ?? frame.riskFlags;
+  }
   if (Array.isArray(frame.activities)) {
     normalized.activities = frame.activities.map((activity) => (
       isGenericActivity(activity)
@@ -84,6 +93,7 @@ function normalizeApplicationNameAlias(name) {
 }
 
 function normalizeCommunicationAliases(applications) {
+  const hasPrimarySlack = applications.some((application) => application.name === "Slack" && application.isPrimary);
   return applications.map((application) => {
     if (application.name === "Slack") {
       return {
@@ -93,7 +103,7 @@ function normalizeCommunicationAliases(applications) {
     }
     if (
       (application.name === "Discord" && !hasSpecificDiscordSurface(application) && looksLikeSlackSurface(application)) ||
-      (application.name === "Microsoft Teams" && !hasSpecificTeamsSurface(application) && looksLikeSlackSurface(application))
+      (application.name === "Microsoft Teams" && !hasSpecificTeamsSurface(application) && (looksLikeSlackSurface(application) || hasPrimarySlack))
     ) {
       return {
         ...application,
@@ -281,6 +291,7 @@ function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = 
       ].includes(hostname) &&
         !isPlaceholderGitHubUrl(parsedUrl) &&
         !isGenericVendorRootUrl(parsedUrl) &&
+        !isOrphanTeamsUrl(parsedUrl, applications) &&
         !(hostname === "music.apple.com" && hasNativeMusicApplication(applications));
     } catch {
       return true;
@@ -309,6 +320,12 @@ function isGenericVendorRootUrl(url) {
     hostname === "www.google.com" ||
     hostname === "www.microsoft.com"
   );
+}
+
+function isOrphanTeamsUrl(url, applications) {
+  const hostname = url.hostname.toLowerCase();
+  if (hostname !== "teams.microsoft.com" && !hostname.endsWith(".teams.microsoft.com")) return false;
+  return !applications.some((application) => application.name === "Microsoft Teams");
 }
 
 function isGenericVisibleIntent(value) {
@@ -381,6 +398,18 @@ function normalizeCalendarTeamsText(value) {
   return value
     .replace(/\bMicrosoft Teams\b/g, "Google Calendar")
     .replace(/\bTeams\b/g, "Google Calendar");
+}
+
+function hasSlackWithoutTeams(applications) {
+  return applications.some((application) => application.name === "Slack") &&
+    !applications.some((application) => application.name === "Microsoft Teams");
+}
+
+function normalizeCommunicationTextToSlack(value) {
+  if (typeof value !== "string") return value;
+  return value
+    .replace(/\bMicrosoft Teams\b/g, "Slack")
+    .replace(/\bTeams\b/g, "Slack");
 }
 
 function redactCommunicationEvidence(summary) {

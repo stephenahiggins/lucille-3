@@ -2594,7 +2594,10 @@ test("frame work summary treats ambiguous Arbor Teams sidebars as Slack", () => 
         primaryReason: "The Teams window is visible but not active."
       }
     ],
-    visitedUrls: ["https://github.com/arbor-education/arbor-fe-library/pull/3606"],
+    visitedUrls: [
+      "https://github.com/arbor-education/arbor-fe-library/pull/3606",
+      "https://teams.microsoft.com/"
+    ],
     primaryApplication: {
       name: "GitHub",
       windowTitle: "arbor-education/arbor-fe-library",
@@ -2602,8 +2605,8 @@ test("frame work summary treats ambiguous Arbor Teams sidebars as Slack", () => 
       primaryReason: "The GitHub interface is focused."
     },
     activities: ["code_review"],
-    visibleIntent: "Reviewing code and communication.",
-    keyTasks: ["Review engineering work and code context"],
+    visibleIntent: "Reviewing code with Microsoft Teams also visible.",
+    keyTasks: ["Review engineering work and code context", "Review Microsoft Teams communication"],
     evidence: [
       {
         id: "obs-cached-teams-slack-001-local-visual-01",
@@ -2616,6 +2619,62 @@ test("frame work summary treats ambiguous Arbor Teams sidebars as Slack", () => 
   });
 
   assert.deepEqual(frame.applications.map((application) => application.name), ["GitHub", "Slack"]);
+  assert.doesNotMatch(JSON.stringify(frame), /Microsoft Teams|teams\.microsoft\.com|\bTeams\b/);
+});
+
+test("frame work summary drops secondary Teams hallucinations when Slack is primary", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-slack-teams-001-raw-frame",
+    frameId: "obs-cached-slack-teams-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Slack",
+      windowTitle: "Rick Bairstow, Ulrik Street-Poulsen",
+      domain: "slack.com"
+    },
+    applications: [
+      {
+        name: "Slack",
+        windowTitle: "Rick Bairstow, Ulrik Street-Poulsen",
+        domain: "slack.com",
+        isPrimary: true,
+        primaryReason: "Foreground window with Slack branding."
+      },
+      {
+        name: "Microsoft Teams",
+        windowTitle: "Microsoft Teams",
+        domain: "teams.microsoft.com",
+        isPrimary: false,
+        primaryReason: "Sidebar with Teams navigation elements."
+      }
+    ],
+    visitedUrls: ["https://slack.com/", "https://teams.microsoft.com/"],
+    primaryApplication: {
+      name: "Slack",
+      windowTitle: "Rick Bairstow, Ulrik Street-Poulsen",
+      domain: "slack.com",
+      primaryReason: "Foreground window with Slack branding."
+    },
+    activities: ["team_communication"],
+    visibleIntent: "Draft or review follow-up communication in Slack with Microsoft Teams also visible.",
+    keyTasks: ["Review Microsoft Teams communication"],
+    evidence: [
+      {
+        id: "obs-cached-slack-teams-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A communication app is visible with team collaboration context."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Slack"]);
+  assert.deepEqual(frame.visitedUrls, ["https://slack.com/"]);
   assert.doesNotMatch(JSON.stringify(frame), /Microsoft Teams|teams\.microsoft\.com|\bTeams\b/);
 });
 
