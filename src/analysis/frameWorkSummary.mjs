@@ -3,8 +3,13 @@ const modelPerspectiveIntentPattern = /\banaly[sz]ing\b.*\b(?:workspace|applicat
 const genericActivityPattern = /^(?:archived_screen_capture|imported_screen_capture|local_screen_capture|analy[sz]e?_?(?:local_)?screen_?frame)$/i;
 
 export function normalizeFrameWorkSummary(frame) {
+  const aliasApplications = normalizeSensitiveApplicationFields(
+    normalizeCommunicationAliases(
+      normalizeApplicationAliases(Array.isArray(frame.applications) ? frame.applications : [])
+    )
+  );
   const calendarTeamsCleanup = normalizeCalendarTeamsHallucinations({
-    applications: normalizeBrowserSurfaceApplications(Array.isArray(frame.applications) ? frame.applications : []),
+    applications: normalizeBrowserSurfaceApplications(aliasApplications),
     visitedUrls: frame.visitedUrls
   });
   const repositoryHostCleanup = normalizeRepositoryHostHallucinations(calendarTeamsCleanup.applications);
@@ -58,6 +63,78 @@ export function normalizeFrameWorkSummary(frame) {
     normalized.evidence = normalizeEvidenceForPrivacy(evidence, applications);
   }
   return normalized;
+}
+
+function normalizeApplicationAliases(applications) {
+  return applications.map((application) => {
+    const name = normalizeApplicationNameAlias(application.name);
+    if (name === application.name) return application;
+    return {
+      ...application,
+      name
+    };
+  });
+}
+
+function normalizeApplicationNameAlias(name) {
+  const text = String(name ?? "").trim();
+  if (/^(?:visual studio code|vs code|vscode)$/i.test(text)) return "Visual Studio Code";
+  if (/^agenta window$/i.test(text)) return "Agenta";
+  return name;
+}
+
+function normalizeCommunicationAliases(applications) {
+  return applications.map((application) => {
+    if (application.name !== "Discord" || hasSpecificDiscordSurface(application) || !looksLikeSlackSurface(application)) {
+      return application;
+    }
+    return {
+      ...application,
+      name: "Slack",
+      domain: application.domain?.includes("slack.com") ? application.domain : null,
+      primaryReason: replaceDiscordWithSlack(application.primaryReason)
+    };
+  });
+}
+
+function hasSpecificDiscordSurface(application) {
+  const text = `${application.windowTitle ?? ""} ${application.domain ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
+  return /\b(discordapp\.com|discord\.gg|server icon|voice channel|voice controls|discord branding|discord channel list)\b/.test(text);
+}
+
+function looksLikeSlackSurface(application) {
+  const text = `${application.windowTitle ?? ""} ${application.domain ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
+  return /\b(slack|slack\.com|arbor|workspace sidebar|purple sidebar|channel sidebar|chat and activity)\b/.test(text);
+}
+
+function replaceDiscordWithSlack(text) {
+  if (typeof text !== "string") return text;
+  return text
+    .replace(/\bDiscord\b/g, "Slack")
+    .replace(/\bdiscord\b/g, "Slack");
+}
+
+function normalizeSensitiveApplicationFields(applications) {
+  return applications.map((application) => {
+    const windowTitle = normalizeSensitiveCommunicationWindowTitle(application);
+    if (windowTitle === application.windowTitle) return application;
+    return {
+      ...application,
+      windowTitle
+    };
+  });
+}
+
+function normalizeSensitiveCommunicationWindowTitle(application) {
+  const name = String(application.name ?? "");
+  const windowTitle = application.windowTitle;
+  if (!/^(?:slack|discord|microsoft teams)$/i.test(name) || typeof windowTitle !== "string") {
+    return windowTitle;
+  }
+  if (/\b(?:new\s+)?message from\b|\bdirect message\b|\bdm from\b/i.test(windowTitle)) {
+    return `${name} notification`;
+  }
+  return windowTitle;
 }
 
 function normalizeCalendarTeamsHallucinations({ applications, visitedUrls }) {

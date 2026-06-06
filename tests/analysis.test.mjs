@@ -10,6 +10,7 @@ import { buildActivityTimeline } from "../src/analysis/activityTimeline.mjs";
 import { buildSessionAnalysis } from "../src/analysis/sessionAnalysis.mjs";
 import { debugFrameAnalysis } from "../src/analysis/debugFrame.mjs";
 import { evaluateOpenAIModels } from "../src/analysis/modelEvaluation.mjs";
+import { normalizeFrameWorkSummary } from "../src/analysis/frameWorkSummary.mjs";
 import { runAnalysis } from "../src/analysis/runAnalysis.mjs";
 import { handleCaptureAction, readCaptureState } from "../src/capture/controller.mjs";
 import { loadDotEnv } from "../src/config/env.mjs";
@@ -2230,6 +2231,248 @@ test("Ollama provider names browser surfaces from visible hostnames", async () =
     "https://www.linkedin.com/",
     "https://github.com/"
   ]);
+});
+
+test("Ollama provider canonicalizes repeated editor and AI tool app names", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-app-canonical-001.png"), "local app canonical screenshot");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-app-canonical-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "VS Code",
+      windowTitle: "CanvasController.php",
+      domain: null,
+      activity: "code_review",
+      visibleTextSummary: "A code editor is visible with an AI evaluation tool nearby.",
+      redactedSignals: ["code editor visible", "AI tool panel visible"],
+      evidenceIds: ["obs-app-canonical-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "code_review",
+          visibleIntent: "Reviewing code while comparing AI evaluation output.",
+          applications: [
+            {
+              name: "VS Code",
+              windowTitle: "CanvasController.php",
+              domain: null,
+              isPrimary: true,
+              primaryReason: "The VS Code editor is the foreground window."
+            },
+            {
+              name: "Agenta Window",
+              windowTitle: "Evaluation dashboard",
+              domain: "app.agenta.ai",
+              isPrimary: false,
+              primaryReason: "The Agenta evaluation window is visible behind the editor."
+            }
+          ],
+          primaryApplication: {
+            name: "VS Code",
+            windowTitle: "CanvasController.php",
+            domain: null,
+            primaryReason: "The VS Code editor is the foreground window."
+          },
+          visitedUrls: ["https://app.agenta.ai/evaluations"],
+          keyTasks: ["Review code", "Compare AI evaluation output"],
+          evidenceSummaries: [
+            "VS Code shows the project file being reviewed.",
+            "Agenta evaluation dashboard is visible."
+          ],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Visual Studio Code", "Agenta"]);
+  assert.equal(frame.primaryApplication.name, "Visual Studio Code");
+});
+
+test("frame work summary canonicalizes cached app aliases", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-app-alias-001-raw-frame",
+    frameId: "obs-cached-app-alias-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "VS Code",
+      windowTitle: "CanvasController.php",
+      domain: null
+    },
+    applications: [
+      {
+        name: "VS Code",
+        windowTitle: "CanvasController.php",
+        domain: null,
+        isPrimary: true,
+        primaryReason: "The VS Code editor is foregrounded."
+      },
+      {
+        name: "Agenta Window",
+        windowTitle: "Evaluation dashboard",
+        domain: "app.agenta.ai",
+        isPrimary: false,
+        primaryReason: "The Agenta evaluation window is visible."
+      }
+    ],
+    visitedUrls: ["https://app.agenta.ai/evaluations"],
+    primaryApplication: {
+      name: "VS Code",
+      windowTitle: "CanvasController.php",
+      domain: null,
+      primaryReason: "The VS Code editor is foregrounded."
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code while comparing AI evaluation output.",
+    keyTasks: ["Review code", "Compare AI evaluation output"],
+    evidence: [
+      {
+        id: "obs-cached-app-alias-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "VS Code shows the project file being reviewed."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Visual Studio Code", "Agenta"]);
+  assert.equal(frame.primaryApplication.name, "Visual Studio Code");
+});
+
+test("frame work summary treats ambiguous Arbor chat sidebars as Slack not Discord", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-slack-001-raw-frame",
+    frameId: "obs-cached-slack-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Cursor",
+      windowTitle: "canvas.desktop.twig",
+      domain: null
+    },
+    applications: [
+      {
+        name: "Visual Studio Code",
+        windowTitle: "canvas.desktop.twig",
+        domain: null,
+        isPrimary: true,
+        primaryReason: "Foreground window with code editor"
+      },
+      {
+        name: "Discord",
+        windowTitle: "Arbor",
+        domain: "discord.com",
+        isPrimary: false,
+        primaryReason: "Sidebar with chat and activity"
+      }
+    ],
+    visitedUrls: [],
+    primaryApplication: {
+      name: "Visual Studio Code",
+      windowTitle: "canvas.desktop.twig",
+      domain: null,
+      primaryReason: "Foreground window with code editor"
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code and team communication.",
+    keyTasks: ["Review engineering work and code context"],
+    evidence: [
+      {
+        id: "obs-cached-slack-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A communication app is visible with team collaboration context."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Visual Studio Code", "Slack"]);
+  assert.doesNotMatch(JSON.stringify(frame), /Discord|discord\.com/);
+});
+
+test("frame work summary redacts communication notification window titles", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-notification-title-001-raw-frame",
+    frameId: "obs-notification-title-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Visual Studio Code",
+      windowTitle: "Project file",
+      domain: null
+    },
+    applications: [
+      {
+        name: "Visual Studio Code",
+        windowTitle: "Project file",
+        domain: null,
+        isPrimary: true,
+        primaryReason: "The code editor is focused."
+      },
+      {
+        name: "Slack",
+        windowTitle: "New message from Lattice",
+        domain: "slack.com",
+        isPrimary: false,
+        primaryReason: "Slack notification is visible."
+      }
+    ],
+    visitedUrls: [],
+    primaryApplication: {
+      name: "Visual Studio Code",
+      windowTitle: "Project file",
+      domain: null,
+      primaryReason: "The code editor is focused."
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code with a communication app visible.",
+    keyTasks: ["Review engineering work and code context"],
+    evidence: [
+      {
+        id: "obs-notification-title-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A code editor is visible with engineering work in progress."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.equal(frame.applications[1].windowTitle, "Slack notification");
+  assert.doesNotMatch(JSON.stringify(frame), /message from|Lattice/);
 });
 
 test("debugFrameAnalysis analyses one frame and exposes the prompt without writing artifacts", async () => {

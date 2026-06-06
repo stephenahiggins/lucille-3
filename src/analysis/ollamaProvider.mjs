@@ -685,6 +685,14 @@ function canonicalApplicationName({ name, windowTitle = null, domain = null }) {
     return "Microsoft Teams";
   }
 
+  if (/\b(visual studio code|vs code|vscode)\b/.test(text)) {
+    return "Visual Studio Code";
+  }
+
+  if (/\bagenta window\b/.test(rawName.toLowerCase())) {
+    return "Agenta";
+  }
+
   return rawName;
 }
 
