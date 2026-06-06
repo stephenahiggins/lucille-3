@@ -1334,6 +1334,89 @@ test("Ollama provider treats ambiguous Discord and Teams chat mix as Slack when 
   assert.doesNotMatch(JSON.stringify(frame), /discord|teams/i);
 });
 
+test("Ollama provider treats ambiguous Teams-only chat as Slack when Teams UI cues are absent", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-slack-teams-only-001.png"), "local slack image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-slack-teams-only-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null,
+      activity: "communication_review",
+      visibleTextSummary: "A communication workspace is visible.",
+      redactedSignals: ["communication workspace visible", "terminal visible"],
+      evidenceIds: ["obs-slack-teams-only-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "communication_review",
+          visibleIntent: "Reviewing a chat message about a project task.",
+          applications: [
+            {
+              name: "Microsoft Teams",
+              windowTitle: "MIS-71371 Adjust",
+              domain: "teams.microsoft.com",
+              isPrimary: true,
+              primaryReason: "The cursor is over the Teams window, indicating it is the primary application."
+            },
+            {
+              name: "Terminal",
+              windowTitle: "Terminal",
+              domain: null,
+              isPrimary: false,
+              primaryReason: "Terminal window is visible but not under the cursor."
+            }
+          ],
+          primaryApplication: {
+            name: "Microsoft Teams",
+            windowTitle: "MIS-71371 Adjust",
+            domain: "teams.microsoft.com",
+            primaryReason: "The cursor is over the Teams window, indicating it is the primary application."
+          },
+          visitedUrls: ["https://teams.microsoft.com/"],
+          keyTasks: ["reviewing Microsoft Teams chat", "Inspect command output and troubleshoot blockers"],
+          evidenceSummaries: ["The user is reviewing a chat message in Microsoft Teams regarding a project task."],
+          riskFlags: ["The user is working with sensitive project information in a shared Teams environment."]
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Slack", "Terminal"]);
+  assert.equal(frame.primaryApplication.name, "Slack");
+  assert.deepEqual(frame.visitedUrls, []);
+  assert.doesNotMatch(JSON.stringify({
+    applications: frame.applications,
+    primaryApplication: frame.primaryApplication,
+    keyTasks: frame.keyTasks,
+    evidence: frame.evidence.map((item) => ({ kind: item.kind, summary: item.summary })),
+    riskFlags: frame.riskFlags,
+    visitedUrls: frame.visitedUrls
+  }), /teams/i);
+});
+
 test("Ollama provider extracts browser visited URLs and strips private URL parts", async () => {
   const root = fixtureRoot();
   const captureDir = path.join(root, "storage", "captures", "2026-05-30");

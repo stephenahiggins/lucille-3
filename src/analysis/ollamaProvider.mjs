@@ -390,7 +390,9 @@ function normalizeSlackDominantCommunicationMix(applications) {
   const hasDiscord = applications.some((application) => application.name === "Discord");
   const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
   const hasBrowser = applications.some((application) => isBrowserApplication(application.name));
-  if (!hasSlack && !(hasDiscord && hasTeams && !hasBrowser)) return applications;
+  const hasAmbiguousTeamsOnlyChat = !hasSlack && !hasDiscord && hasTeams && !hasBrowser &&
+    applications.some((application) => application.name === "Microsoft Teams" && !hasSpecificTeamsCue(application));
+  if (!hasSlack && !(hasDiscord && hasTeams && !hasBrowser) && !hasAmbiguousTeamsOnlyChat) return applications;
 
   const slackCueText = applications.map(applicationSlackCueText).join(" ");
   const hasStrongSlackCue = (
@@ -401,7 +403,7 @@ function normalizeSlackDominantCommunicationMix(applications) {
     /\b(arbor-data-and-ai|engineering slack)\b/.test(slackCueText)
   );
   const hasAmbiguousMixedChatHallucination = !hasSlack && hasDiscord && hasTeams && !hasBrowser;
-  if (!hasStrongSlackCue && !hasAmbiguousMixedChatHallucination) return applications;
+  if (!hasStrongSlackCue && !hasAmbiguousMixedChatHallucination && !hasAmbiguousTeamsOnlyChat) return applications;
   if (applications.some((application) => application.name === "Discord" && application.isPrimary && hasSpecificDiscordCue(application))) {
     return applications;
   }
@@ -409,6 +411,7 @@ function normalizeSlackDominantCommunicationMix(applications) {
   const normalized = applications.map((application) => {
     if (application.name !== "Discord" && application.name !== "Microsoft Teams") return application;
     if (application.name === "Discord" && application.isPrimary && hasSpecificDiscordCue(application)) return application;
+    if (application.name === "Microsoft Teams" && hasSpecificTeamsCue(application)) return application;
     return {
       ...application,
       name: "Slack",
@@ -432,6 +435,11 @@ function hasSpecificDiscordCue(application) {
     /\bcursor\b.*\bdiscord\b/.test(text) ||
     /\bdiscord\b.*\bcursor\b/.test(text)
   );
+}
+
+function hasSpecificTeamsCue(application) {
+  const text = applicationSlackCueText(application);
+  return /\b(teams navigation|teams tenant|calendar|calls|team list|teams list|activity feed)\b/.test(text);
 }
 
 function normalizeVisitedUrls({ parsedUrls, parsedApplications, applications, observation }) {

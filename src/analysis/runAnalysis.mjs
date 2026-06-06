@@ -576,7 +576,9 @@ function normalizeCachedSlackDominantCommunicationMix(applications) {
   const hasDiscord = applications.some((application) => application.name === "Discord");
   const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
   const hasBrowser = applications.some((application) => /\b(browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium)\b/i.test(String(application.name ?? "")));
-  if (!hasSlack && !(hasDiscord && hasTeams && !hasBrowser)) return dedupeCachedApplications(applications);
+  const hasAmbiguousTeamsOnlyChat = !hasSlack && !hasDiscord && hasTeams && !hasBrowser &&
+    applications.some((application) => application.name === "Microsoft Teams" && !hasSpecificTeamsCue(application));
+  if (!hasSlack && !(hasDiscord && hasTeams && !hasBrowser) && !hasAmbiguousTeamsOnlyChat) return dedupeCachedApplications(applications);
   const slackCueText = applications.map(applicationSlackDiscordCueText).join(" ");
   const hasStrongSlackCue = (
     /\bslack\b/.test(slackCueText) ||
@@ -586,7 +588,7 @@ function normalizeCachedSlackDominantCommunicationMix(applications) {
     /\b(arbor-data-and-ai|engineering slack)\b/.test(slackCueText)
   );
   const hasAmbiguousMixedChatHallucination = !hasSlack && hasDiscord && hasTeams && !hasBrowser;
-  if (!hasStrongSlackCue && !hasAmbiguousMixedChatHallucination) return dedupeCachedApplications(applications);
+  if (!hasStrongSlackCue && !hasAmbiguousMixedChatHallucination && !hasAmbiguousTeamsOnlyChat) return dedupeCachedApplications(applications);
   if (applications.some((application) => application.name === "Discord" && application.isPrimary && hasSpecificDiscordCue(application))) {
     return dedupeCachedApplications(applications);
   }
@@ -594,6 +596,7 @@ function normalizeCachedSlackDominantCommunicationMix(applications) {
   const normalized = applications.map((application) => {
     if (application.name !== "Discord" && application.name !== "Microsoft Teams") return application;
     if (application.name === "Discord" && application.isPrimary && hasSpecificDiscordCue(application)) return application;
+    if (application.name === "Microsoft Teams" && hasSpecificTeamsCue(application)) return application;
     return {
       ...application,
       name: "Slack",
@@ -616,6 +619,11 @@ function hasSpecificDiscordCue(application) {
     /\bcursor\b.*\bdiscord\b/.test(text) ||
     /\bdiscord\b.*\bcursor\b/.test(text)
   );
+}
+
+function hasSpecificTeamsCue(application) {
+  const text = applicationSlackDiscordCueText(application);
+  return /\b(teams navigation|teams tenant|calendar|calls|team list|teams list|activity feed)\b/.test(text);
 }
 
 function dedupeCachedApplications(applications) {
