@@ -258,6 +258,104 @@ test("runAnalysis resumes from cached real frame analysis without re-calling the
   assert.equal(memory.regularTasks[0].observedFrameCount, 3);
 });
 
+test("runAnalysis normalizes generic cached import metadata as a blank frame", async () => {
+  const root = fixtureRoot();
+  const day = "2026-05-30";
+  const observation = readFileSync(path.join(root, "storage", "captures", day, "observations.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+  const cacheDir = path.join(
+    root,
+    "storage",
+    "analysis",
+    day,
+    "frame-cache",
+    "moondream-1-8b",
+    "frame-analysis-visual-app-url-memory-512-2026-06-06"
+  );
+  mkdirSync(cacheDir, { recursive: true });
+  const frame = {
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: observation.evidenceIds[0],
+    frameId: observation.id,
+    day,
+    capturedAt: observation.capturedAt,
+    provider: "ollama",
+    model: "moondream:1.8b",
+    surface: {
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null
+    },
+    applications: [
+      {
+        name: "Unknown",
+        windowTitle: null,
+        domain: null,
+        isPrimary: true,
+        primaryReason: "No visible application branding or window title"
+      }
+    ],
+    visitedUrls: [],
+    primaryApplication: {
+      name: "Unknown",
+      windowTitle: null,
+      domain: null,
+      primaryReason: "No visible application branding or window title"
+    },
+    activities: ["archived_screen_capture"],
+    visibleIntent: "analyze locally imported screen frame",
+    keyTasks: ["Review a visible work surface", "analyze screen frame"],
+    evidence: [
+      {
+        id: observation.evidenceIds[0],
+        kind: "local_visual_summary",
+        summary: "A screen frame was imported from the Downloads Archive for local Lucille analysis."
+      },
+      {
+        id: `${observation.id}-local-visual-02`,
+        kind: "local_visual_summary",
+        summary: "The screen frame is a day-scoped local raw media."
+      }
+    ],
+    redactions: ["no_keystrokes", "no_clipboard_capture", "no_audio_capture", "no_raw_document_bodies", "no_raw_message_bodies", "query_strings_removed"],
+    riskFlags: []
+  };
+  writeFileSync(path.join(cacheDir, `${observation.id}.json`), JSON.stringify({
+    schemaVersion: "frame-analysis-cache.v1",
+    promptVersion: "frame-analysis-visual-app-url-memory-512-2026-06-06",
+    provider: "ollama",
+    model: "moondream:1.8b",
+    day,
+    frameId: observation.id,
+    evidenceId: observation.evidenceIds[0],
+    cachedAt: "2026-06-06T00:00:00.000Z",
+    frame
+  }, null, 2) + "\n");
+
+  await runAnalysis({
+    root,
+    day,
+    model: "moondream:1.8b",
+    slides: "1",
+    fetchImpl: async () => {
+      throw new Error("provider should not be called for cached frame");
+    }
+  });
+
+  const analysedFrame = readFileSync(path.join(root, "storage", "analysis", day, "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.equal(analysedFrame.primaryApplication.name, "No visible application");
+  assert.deepEqual(analysedFrame.applications.map((application) => application.name), ["No visible application"]);
+  assert.deepEqual(analysedFrame.keyTasks, ["No visible work surface identified"]);
+  assert.match(analysedFrame.evidence[0].summary, /blank, obscured, or too dark/);
+  assert.doesNotMatch(JSON.stringify(analysedFrame), /Downloads Archive|structured metadata|raw media/i);
+});
+
 test("MMP readiness verifier rejects stale task-skill summaries", async () => {
   const root = fixtureRoot();
   await runAnalysis({

@@ -818,9 +818,12 @@ function canonicalTaskLabel(task) {
 
 function requireGroundedVisualSummaries(summaries, observationId) {
   const genericSummaries = new Set([
+    "a screen frame was imported from the downloads archive for local lucille analysis.",
     "a visible screen frame was imported from the downloads archive for local lucille analysis.",
     "imported archived visible frame",
+    "the screen frame is a day-scoped local raw media.",
     "day-scoped local raw media",
+    "the screen frame contains structured metadata only before analysis.",
     "structured metadata only before analysis",
     "explicit local capture"
   ]);

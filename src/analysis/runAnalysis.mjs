@@ -470,6 +470,10 @@ function frameCachePathForVersion({ root, day, model, observation, promptVersion
 }
 
 function normalizeCachedFrame(frame) {
+  if (isGenericUnknownCachedFrame(frame)) {
+    return normalizeGenericUnknownCachedFrame(frame);
+  }
+
   const rawApplications = Array.isArray(frame.applications)
     ? frame.applications.map((application) => {
       const text = applicationSlackDiscordCueText(application);
@@ -524,6 +528,51 @@ function normalizeCachedFrame(frame) {
     riskFlags: (shouldCleanSlackText || shouldCleanCalendarText) && Array.isArray(frame.riskFlags)
       ? frame.riskFlags.map(normalizeCachedText)
       : frame.riskFlags
+  };
+}
+
+function isGenericUnknownCachedFrame(frame) {
+  const applications = Array.isArray(frame.applications) ? frame.applications : [];
+  const evidence = Array.isArray(frame.evidence) ? frame.evidence : [];
+  const allApplicationsUnknown = applications.length === 0 || applications.every((application) => application?.name === "Unknown");
+  const text = [
+    frame.visibleIntent,
+    ...(Array.isArray(frame.activities) ? frame.activities : []),
+    ...(Array.isArray(frame.keyTasks) ? frame.keyTasks : []),
+    ...evidence.map((item) => item?.summary)
+  ].join(" ").toLowerCase();
+  return allApplicationsUnknown && /imported|archive|raw media|structured metadata|screen frame/.test(text);
+}
+
+function normalizeGenericUnknownCachedFrame(frame) {
+  const application = {
+    name: "No visible application",
+    windowTitle: null,
+    domain: null,
+    isPrimary: true,
+    primaryReason: "The frame is blank, obscured, or contains no identifiable application UI."
+  };
+  return {
+    ...frame,
+    activities: ["blank_or_obscured_screen"],
+    visibleIntent: "No visible application or work surface can be identified in this frame.",
+    applications: [application],
+    primaryApplication: {
+      name: application.name,
+      windowTitle: application.windowTitle,
+      domain: application.domain,
+      primaryReason: application.primaryReason
+    },
+    visitedUrls: [],
+    keyTasks: ["No visible work surface identified"],
+    evidence: [
+      {
+        id: frame.evidenceId ?? frame.frameId,
+        kind: "local_visual_summary",
+        summary: "The captured frame is blank, obscured, or too dark to identify an application."
+      }
+    ],
+    riskFlags: []
   };
 }
 
