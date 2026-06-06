@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildActivityTimeline } from "../src/analysis/activityTimeline.mjs";
+import { analyseObservationWithOllama } from "../src/analysis/ollamaProvider.mjs";
 import { buildSessionAnalysis } from "../src/analysis/sessionAnalysis.mjs";
 import { debugFrameAnalysis } from "../src/analysis/debugFrame.mjs";
 import { evaluateOpenAIModels } from "../src/analysis/modelEvaluation.mjs";
@@ -1269,6 +1270,149 @@ test("Ollama provider retries a timed-out local image request at fallback size",
   assert.equal(attempts.length, 2);
   assert.match(attempts[0], /1536px/);
   assert.match(attempts[1], /1024px/);
+});
+
+test("Ollama provider retries a stalled local response body at fallback size", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-body-timeout-001.png"), "local stalled body retry image");
+
+  const observation = {
+    schemaVersion: "observation.v1",
+    id: "obs-body-timeout-001",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    appName: "Cursor",
+    windowTitle: "Lucille project workspace",
+    domain: null,
+    activity: "code_editing",
+    visibleTextSummary: "A visible screen frame was captured for local analysis.",
+    redactedSignals: ["explicit local capture"],
+    evidenceIds: ["obs-body-timeout-001-raw-frame"]
+  };
+
+  const attempts = [];
+  const frame = await analyseObservationWithOllama({
+    root,
+    day: "2026-05-30",
+    observation,
+    evidenceNumber: 1,
+    model: "moondream:1.8b",
+    requestTimeoutMs: 5,
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      attempts.push(body.prompt);
+      return {
+        ok: true,
+        status: 200,
+        json: attempts.length === 1
+          ? async () => new Promise(() => {})
+          : async () => ({
+            response: JSON.stringify({
+              activity: "code_review",
+              visibleIntent: "Reviewing local code.",
+              applications: [
+                {
+                  name: "Cursor",
+                  windowTitle: "Lucille project workspace",
+                  domain: null,
+                  isPrimary: true,
+                  primaryReason: "The editor is the focused window."
+                }
+              ],
+              primaryApplication: {
+                name: "Cursor",
+                windowTitle: "Lucille project workspace",
+                domain: null,
+                primaryReason: "The editor is the focused window."
+              },
+              visitedUrls: [],
+              keyTasks: ["Review engineering work and code context"],
+              evidenceSummaries: ["Cursor shows a local code workspace."],
+              riskFlags: []
+            })
+          })
+      };
+    }
+  });
+
+  assert.equal(attempts.length, 2);
+  assert.match(attempts[0], /1536px/);
+  assert.match(attempts[1], /1024px/);
+  assert.equal(frame.primaryApplication.name, "Cursor");
+});
+
+test("Ollama provider accepts configured local image dimensions", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-dimension-config-001.png"), "local dimension config image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-dimension-config-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Cursor",
+      windowTitle: "Lucille project workspace",
+      domain: null,
+      activity: "code_editing",
+      visibleTextSummary: "A visible screen frame was captured for local analysis.",
+      redactedSignals: ["explicit local capture"],
+      evidenceIds: ["obs-dimension-config-001-raw-frame"]
+    }) + "\n"
+  );
+
+  const attempts = [];
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    env: {
+      ...process.env,
+      LUCILLE_OLLAMA_IMAGE_DIMENSIONS: "1024,768"
+    },
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      attempts.push(body.prompt);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: JSON.stringify({
+            activity: "code_review",
+            visibleIntent: "Reviewing local code.",
+            applications: [
+              {
+                name: "Cursor",
+                windowTitle: "Lucille project workspace",
+                domain: null,
+                isPrimary: true,
+                primaryReason: "The editor is the focused window."
+              }
+            ],
+            primaryApplication: {
+              name: "Cursor",
+              windowTitle: "Lucille project workspace",
+              domain: null,
+              primaryReason: "The editor is the focused window."
+            },
+            visitedUrls: [],
+            keyTasks: ["Review engineering work and code context"],
+            evidenceSummaries: ["Cursor shows a local code workspace."],
+            riskFlags: []
+          })
+        })
+      };
+    }
+  });
+
+  assert.equal(attempts.length, 1);
+  assert.match(attempts[0], /1024px/);
+  assert.doesNotMatch(attempts[0], /1536px/);
 });
 
 test("Ollama provider retries malformed local model JSON at fallback size", async () => {
@@ -2681,6 +2825,11 @@ test("frame work summary drops known inferred vendor URLs but keeps real visited
       "https://arbor.allscan.net/",
       "https://music.apple.com/",
       "https://github.com/arbor-education/arbor-education/pull/3606",
+      "https://github.com/username/repo",
+      "https://github.com/username/repo/pull/123",
+      "https://gitkraken.com/",
+      "https://www.google.com/",
+      "https://www.microsoft.com/",
       "https://www.adobe.com/",
       "https://www.apple.com/"
     ],

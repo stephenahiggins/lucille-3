@@ -8,7 +8,7 @@ import { normalizeFrameWorkSummary } from "./frameWorkSummary.mjs";
 
 const defaultEndpoint = "http://127.0.0.1:11434";
 const imageExtensions = [".png", ".jpg", ".jpeg", ".webp"];
-const modelImageDimensions = [1536, 1024, 768];
+const defaultModelImageDimensions = [1536, 1024, 768];
 const modelRequestTimeoutMs = 240_000;
 
 export class LocalVisualProviderUnavailable extends Error {
@@ -27,6 +27,10 @@ export async function analyseObservationWithOllama(options = {}) {
   }), "model", 120);
   const endpoint = normalizeEndpoint(options.endpoint ?? defaultEndpoint);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? modelRequestTimeoutMs;
+  const imageDimensions = parseModelImageDimensions(
+    options.imageDimensions ?? options.env?.LUCILLE_OLLAMA_IMAGE_DIMENSIONS ?? defaultModelImageDimensions
+  );
 
   if (typeof fetchImpl !== "function") {
     throw new LocalVisualProviderUnavailable("Ollama provider requires a fetch implementation.");
@@ -38,7 +42,7 @@ export async function analyseObservationWithOllama(options = {}) {
 
   let parsed = null;
   let lastError = null;
-  for (const [index, maxDimension] of modelImageDimensions.entries()) {
+  for (const [index, maxDimension] of imageDimensions.entries()) {
     const preparedImage = prepareModelImage(mediaPath, maxDimension);
     const imageBase64 = readFileSync(preparedImage.path, "base64");
     preparedImage.cleanup();
@@ -50,10 +54,10 @@ export async function analyseObservationWithOllama(options = {}) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
-      }, modelRequestTimeoutMs);
+      }, requestTimeoutMs);
     } catch (error) {
       lastError = error;
-      if (!isAbortLikeError(error) || index === modelImageDimensions.length - 1) {
+      if (!isAbortLikeError(error) || index === imageDimensions.length - 1) {
         throw new LocalVisualProviderUnavailable(
           `Ollama provider is unavailable at ${endpoint}: ${error.message}`
         );
@@ -68,13 +72,13 @@ export async function analyseObservationWithOllama(options = {}) {
       );
     }
 
-    const payload = await response.json();
     try {
+      const payload = await readResponseJsonWithTimeout(response, requestTimeoutMs);
       parsed = parseOllamaResponse(payload);
       break;
     } catch (error) {
       lastError = error;
-      if (index === modelImageDimensions.length - 1) throw error;
+      if (index === imageDimensions.length - 1) throw error;
     }
   }
 
@@ -122,6 +126,20 @@ async function fetchWithTimeout(fetchImpl, url, options, timeoutMs) {
       ...options,
       signal: controller.signal
     });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readResponseJsonWithTimeout(response, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      response.json(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Ollama provider response body timed out.")), timeoutMs);
+      })
+    ]);
   } finally {
     clearTimeout(timeout);
   }
@@ -190,7 +208,7 @@ export function buildOllamaPrompt({ observation }) {
   ].join(" ");
 }
 
-export function buildOllamaRequest({ model, observation, imageBase64, maxDimension = modelImageDimensions[0] }) {
+export function buildOllamaRequest({ model, observation, imageBase64, maxDimension = defaultModelImageDimensions[0] }) {
   return {
     model,
     stream: false,
@@ -202,6 +220,20 @@ export function buildOllamaRequest({ model, observation, imageBase64, maxDimensi
 
 function isAbortLikeError(error) {
   return error?.name === "AbortError" || /aborted|abort|timeout|timed out/i.test(String(error?.message ?? ""));
+}
+
+function parseModelImageDimensions(value) {
+  const rawDimensions = Array.isArray(value)
+    ? value
+    : String(value)
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  const dimensions = rawDimensions.map((item) => Number(item));
+  if (dimensions.length === 0 || dimensions.some((item) => !Number.isInteger(item) || item < 128 || item > 4096)) {
+    throw new Error("LUCILLE_OLLAMA_IMAGE_DIMENSIONS must be a comma-separated list of pixel sizes between 128 and 4096.");
+  }
+  return dimensions;
 }
 
 function parseOllamaResponse(payload) {

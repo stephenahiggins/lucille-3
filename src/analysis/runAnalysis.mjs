@@ -99,6 +99,7 @@ export async function runAnalysis(options = {}) {
     model,
     provider,
     fetchImpl: config.fetchImpl,
+    env: config.env,
     ollamaEndpoint: config.ollamaEndpoint ?? config.env.OLLAMA_HOST,
     onFrameProgress: config.onFrameProgress
   });
@@ -337,6 +338,7 @@ async function buildFrameAnalysis({
   model,
   provider,
   fetchImpl,
+  env,
   ollamaEndpoint,
   onFrameProgress
 }) {
@@ -367,6 +369,7 @@ async function buildFrameAnalysis({
         evidenceNumber: index + 1,
         model,
         fetchImpl,
+        env,
         endpoint: ollamaEndpoint
       });
       writeCachedFrameAnalysis({ root, day, model, observation, frame });

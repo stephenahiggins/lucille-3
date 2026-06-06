@@ -264,7 +264,8 @@ function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = 
   if (!Array.isArray(visitedUrls)) return visitedUrls;
   return unique(visitedUrls.map(normalizeKnownUrlAlias).filter((url) => {
     try {
-      const hostname = new URL(url).hostname.toLowerCase();
+      const parsedUrl = new URL(url);
+      const hostname = parsedUrl.hostname.toLowerCase();
       return ![
         "arbor.com",
         "canvas.com",
@@ -274,9 +275,12 @@ function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = 
         "jira.com",
         "chrome.com",
         "arbor.allscan.net",
+        "gitkraken.com",
         "www.adobe.com",
         "www.apple.com"
       ].includes(hostname) &&
+        !isPlaceholderGitHubUrl(parsedUrl) &&
+        !isGenericVendorRootUrl(parsedUrl) &&
         !(hostname === "music.apple.com" && hasNativeMusicApplication(applications));
     } catch {
       return true;
@@ -293,6 +297,18 @@ function normalizeKnownUrlAlias(url) {
 
 function hasNativeMusicApplication(applications) {
   return applications.some((application) => /^(?:apple music|music|spotify)$/i.test(application.name));
+}
+
+function isPlaceholderGitHubUrl(url) {
+  return url.hostname.toLowerCase() === "github.com" && /^\/username\/repo(?:\/|$)/i.test(url.pathname);
+}
+
+function isGenericVendorRootUrl(url) {
+  const hostname = url.hostname.toLowerCase();
+  return url.pathname === "/" && (
+    hostname === "www.google.com" ||
+    hostname === "www.microsoft.com"
+  );
 }
 
 function isGenericVisibleIntent(value) {
