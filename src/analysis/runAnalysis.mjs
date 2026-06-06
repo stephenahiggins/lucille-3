@@ -489,34 +489,73 @@ function normalizeCachedFrame(frame) {
       };
     })
     : [];
-  let applications = normalizeCachedSlackDominantCommunicationMix(rawApplications);
+  let applications = normalizeCachedSlackDominantCommunicationMix(
+    normalizeCachedCalendarApplicationMix(rawApplications)
+  );
   const hasSlack = applications.some((application) => application.name === "Slack");
   const hasDiscord = applications.some((application) => application.name === "Discord");
   const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
+  const hasGoogleCalendar = applications.some((application) => application.name === "Google Calendar");
   const shouldCleanSlackText = hasSlack && !hasDiscord && !hasTeams;
+  const shouldCleanCalendarText = hasGoogleCalendar && !hasTeams;
   const primaryApplication = normalizeCachedPrimaryApplication(frame.primaryApplication, applications);
   applications = ensureCachedSinglePrimary(applications, primaryApplication);
+  const normalizeCachedText = (text) => {
+    let normalized = text;
+    if (shouldCleanSlackText) normalized = replaceCommunicationAppWithSlack(normalized);
+    if (shouldCleanCalendarText) normalized = replaceTeamsWithGoogleCalendar(normalized);
+    return normalized;
+  };
 
   return {
     ...frame,
     applications,
     primaryApplication,
-    visitedUrls: Array.isArray(frame.visitedUrls)
-      ? frame.visitedUrls.filter(isPlausibleVisitedUrl).filter((url) => isVisitedUrlConsistentWithApplications(url, applications))
-      : [],
-    keyTasks: shouldCleanSlackText && Array.isArray(frame.keyTasks)
-      ? frame.keyTasks.map(replaceCommunicationAppWithSlack)
+    visitedUrls: normalizeCachedVisitedUrls(frame.visitedUrls, applications),
+    keyTasks: (shouldCleanSlackText || shouldCleanCalendarText) && Array.isArray(frame.keyTasks)
+      ? frame.keyTasks.map(normalizeCachedText)
       : frame.keyTasks,
-    evidence: shouldCleanSlackText && Array.isArray(frame.evidence)
+    evidence: (shouldCleanSlackText || shouldCleanCalendarText) && Array.isArray(frame.evidence)
       ? frame.evidence.map((item) => ({
         ...item,
-        summary: replaceCommunicationAppWithSlack(item.summary)
+        summary: normalizeCachedText(item.summary)
       }))
       : frame.evidence,
-    riskFlags: shouldCleanSlackText && Array.isArray(frame.riskFlags)
-      ? frame.riskFlags.map(replaceCommunicationAppWithSlack)
+    riskFlags: (shouldCleanSlackText || shouldCleanCalendarText) && Array.isArray(frame.riskFlags)
+      ? frame.riskFlags.map(normalizeCachedText)
       : frame.riskFlags
   };
+}
+
+function normalizeCachedVisitedUrls(visitedUrls, applications) {
+  const urls = Array.isArray(visitedUrls)
+    ? visitedUrls.filter(isPlausibleVisitedUrl)
+    : [];
+  for (const application of applications) {
+    const url = applicationDomainVisitedUrl(application);
+    if (url) urls.push(url);
+  }
+  return unique(urls)
+    .filter((url) => isVisitedUrlConsistentWithApplications(url, applications))
+    .slice(0, 12);
+}
+
+function applicationDomainVisitedUrl(application) {
+  if (!application?.domain || !isWebApplicationWithUrl(application.name)) return null;
+  const value = String(application.domain);
+  try {
+    const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`);
+    url.search = "";
+    url.hash = "";
+    return `${url.protocol}//${url.hostname}${url.pathname || "/"}`;
+  } catch {
+    return null;
+  }
+}
+
+function isWebApplicationWithUrl(name) {
+  return /\b(browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium)\b/i.test(String(name ?? "")) ||
+    /^(github|jira|google calendar)$/i.test(String(name ?? ""));
 }
 
 function ensureCachedSinglePrimary(applications, primaryApplication) {
@@ -554,6 +593,18 @@ function normalizeCachedPrimaryApplication(primaryApplication, applications) {
       windowTitle: primaryFromApplications.windowTitle,
       domain: primaryFromApplications.domain,
       primaryReason: replaceCommunicationAppWithSlack(primaryFromApplications.primaryReason)
+    };
+  }
+  if (
+    primaryFromApplications &&
+    primaryApplication.name === "Microsoft Teams" &&
+    primaryFromApplications.name === "Google Calendar"
+  ) {
+    return {
+      name: primaryFromApplications.name,
+      windowTitle: primaryFromApplications.windowTitle,
+      domain: primaryFromApplications.domain,
+      primaryReason: replaceTeamsWithGoogleCalendar(primaryFromApplications.primaryReason)
     };
   }
   return primaryApplication.name === "Discord" && /\barbor\b/i.test(`${primaryApplication.windowTitle ?? ""} ${primaryApplication.domain ?? ""}`)
@@ -608,6 +659,22 @@ function normalizeCachedSlackDominantCommunicationMix(applications) {
   return dedupeCachedApplications(normalized);
 }
 
+function normalizeCachedCalendarApplicationMix(applications) {
+  const normalized = applications.map((application) => {
+    if (application.name !== "Microsoft Teams" || !looksLikeCalendarSurface(application) || hasSpecificTeamsCue(application)) {
+      return application;
+    }
+    return {
+      ...application,
+      name: "Google Calendar",
+      windowTitle: "Google Calendar",
+      domain: "calendar.google.com",
+      primaryReason: replaceTeamsWithGoogleCalendar(application.primaryReason)
+    };
+  });
+  return dedupeCachedApplications(normalized);
+}
+
 function applicationSlackDiscordCueText(application) {
   return `${application?.name ?? ""} ${application?.windowTitle ?? ""} ${application?.domain ?? ""} ${application?.primaryReason ?? ""}`.toLowerCase();
 }
@@ -623,7 +690,22 @@ function hasSpecificDiscordCue(application) {
 
 function hasSpecificTeamsCue(application) {
   const text = applicationSlackDiscordCueText(application);
-  return /\b(teams navigation|teams tenant|calendar|calls|team list|teams list|activity feed)\b/.test(text);
+  return /\b(teams navigation|teams tenant|calls|team list|teams list|activity feed)\b/.test(text);
+}
+
+function looksLikeCalendarSurface(application) {
+  const text = applicationSlackDiscordCueText(application);
+  return /\b(calendar|january|february|march|april|may|june|july|august|september|october|november|december)\b/.test(text);
+}
+
+function replaceTeamsWithGoogleCalendar(text) {
+  if (typeof text !== "string") return text;
+  return text
+    .replace(/\bMicrosoft Teams calendar\b/gi, "Google Calendar")
+    .replace(/\bTeams calendar\b/gi, "Google Calendar")
+    .replace(/\bMicrosoft Teams\b/g, "Google Calendar")
+    .replace(/\bTeams\b/g, "Google Calendar")
+    .replace(/\bteams\b/g, "Google Calendar");
 }
 
 function dedupeCachedApplications(applications) {

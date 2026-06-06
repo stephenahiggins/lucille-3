@@ -1417,6 +1417,91 @@ test("Ollama provider treats ambiguous Teams-only chat as Slack when Teams UI cu
   }), /teams/i);
 });
 
+test("Ollama provider treats Teams-labelled calendar surfaces as Google Calendar", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-calendar-001.png"), "local calendar image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-calendar-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Google Chrome",
+      windowTitle: "Google Calendar",
+      domain: "calendar.google.com",
+      activity: "calendar_review",
+      visibleTextSummary: "Google Calendar is visible beside a code editor.",
+      redactedSignals: ["calendar visible", "code editor visible"],
+      evidenceIds: ["obs-calendar-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "calendar_review",
+          visibleIntent: "Reviewing calendar while working on code.",
+          applications: [
+            {
+              name: "Microsoft Teams",
+              windowTitle: "June 2026",
+              domain: "teams.microsoft.com",
+              isPrimary: false,
+              primaryReason: "calendar view"
+            },
+            {
+              name: "Visual Studio Code",
+              windowTitle: "Visual Studio Code",
+              domain: null,
+              isPrimary: true,
+              primaryReason: "code editor"
+            }
+          ],
+          primaryApplication: {
+            name: "Visual Studio Code",
+            windowTitle: "Visual Studio Code",
+            domain: null,
+            primaryReason: "code editor"
+          },
+          visitedUrls: ["https://teams.microsoft.com/"],
+          keyTasks: ["working with Microsoft Teams", "Review engineering work and code context"],
+          evidenceSummaries: ["The user is managing their calendar using Microsoft Teams."],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), [
+    "Google Calendar",
+    "Visual Studio Code",
+    "Google Chrome"
+  ]);
+  assert.equal(frame.primaryApplication.name, "Visual Studio Code");
+  assert.deepEqual(frame.visitedUrls, ["https://calendar.google.com/"]);
+  assert.doesNotMatch(JSON.stringify({
+    applications: frame.applications,
+    keyTasks: frame.keyTasks,
+    evidence: frame.evidence.map((item) => ({ kind: item.kind, summary: item.summary })),
+    visitedUrls: frame.visitedUrls
+  }), /teams/i);
+});
+
 test("Ollama provider extracts browser visited URLs and strips private URL parts", async () => {
   const root = fixtureRoot();
   const captureDir = path.join(root, "storage", "captures", "2026-05-30");

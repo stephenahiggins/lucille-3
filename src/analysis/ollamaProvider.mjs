@@ -314,7 +314,9 @@ function normalizeApplications({ parsedApplications, parsedPrimaryApplication, o
 
   ensureObservationApplication(applications, observation);
   ensureSinglePrimary(applications, observation);
-  const normalizedApplications = normalizeSlackDominantCommunicationMix(dedupeApplications(applications)).slice(0, 8);
+  const normalizedApplications = normalizeSlackDominantCommunicationMix(
+    normalizeCalendarApplicationMix(dedupeApplications(applications))
+  ).slice(0, 8);
   ensureSinglePrimary(normalizedApplications, observation);
   return normalizedApplications;
 }
@@ -424,6 +426,22 @@ function normalizeSlackDominantCommunicationMix(applications) {
   return dedupeApplications(normalized);
 }
 
+function normalizeCalendarApplicationMix(applications) {
+  const normalized = applications.map((application) => {
+    if (application.name !== "Microsoft Teams" || !looksLikeCalendarSurface(application) || hasSpecificTeamsCue(application)) {
+      return application;
+    }
+    return {
+      ...application,
+      name: "Google Calendar",
+      windowTitle: "Google Calendar",
+      domain: "calendar.google.com",
+      primaryReason: replaceTeamsWithGoogleCalendar(application.primaryReason)
+    };
+  });
+  return dedupeApplications(normalized);
+}
+
 function applicationSlackCueText(application) {
   return `${application.name ?? ""} ${application.windowTitle ?? ""} ${application.domain ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
 }
@@ -439,7 +457,22 @@ function hasSpecificDiscordCue(application) {
 
 function hasSpecificTeamsCue(application) {
   const text = applicationSlackCueText(application);
-  return /\b(teams navigation|teams tenant|calendar|calls|team list|teams list|activity feed)\b/.test(text);
+  return /\b(teams navigation|teams tenant|calls|team list|teams list|activity feed)\b/.test(text);
+}
+
+function looksLikeCalendarSurface(application) {
+  const text = applicationSlackCueText(application);
+  return /\b(calendar|january|february|march|april|may|june|july|august|september|october|november|december)\b/.test(text);
+}
+
+function replaceTeamsWithGoogleCalendar(text) {
+  if (typeof text !== "string") return text;
+  return text
+    .replace(/\bMicrosoft Teams calendar\b/gi, "Google Calendar")
+    .replace(/\bTeams calendar\b/gi, "Google Calendar")
+    .replace(/\bMicrosoft Teams\b/g, "Google Calendar")
+    .replace(/\bTeams\b/g, "Google Calendar")
+    .replace(/\bteams\b/g, "Google Calendar");
 }
 
 function normalizeVisitedUrls({ parsedUrls, parsedApplications, applications, observation }) {
@@ -460,7 +493,7 @@ function normalizeVisitedUrls({ parsedUrls, parsedApplications, applications, ob
   }
 
   for (const application of applications) {
-    if (application.domain && isBrowserApplication(application.name)) {
+    if (application.domain && (isBrowserApplication(application.name) || isWebApplicationWithUrl(application.name))) {
       const url = optionalVisitedUrl(application.domain, "applications.domain");
       if (url) urls.push(url);
     }
@@ -542,6 +575,10 @@ function normalizeUrlPathname(pathname, location) {
 
 function isBrowserApplication(name) {
   return /\b(browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium)\b/i.test(String(name ?? ""));
+}
+
+function isWebApplicationWithUrl(name) {
+  return /^(github|jira|google calendar)$/i.test(String(name ?? ""));
 }
 
 function isVisitedUrlConsistentWithApplications(url, applications) {
@@ -665,8 +702,15 @@ function normalizeTextArrayForApplications(values, applications) {
   const hasSlack = applications.some((application) => application.name === "Slack");
   const hasDiscord = applications.some((application) => application.name === "Discord");
   const hasTeams = applications.some((application) => application.name === "Microsoft Teams");
-  if (!hasSlack || hasDiscord || hasTeams) return values;
-  return values.map(replaceCommunicationAppWithSlack);
+  const hasGoogleCalendar = applications.some((application) => application.name === "Google Calendar");
+  let normalized = values;
+  if (hasSlack && !hasDiscord && !hasTeams) {
+    normalized = normalized.map(replaceCommunicationAppWithSlack);
+  }
+  if (hasGoogleCalendar && !hasTeams) {
+    normalized = normalized.map(replaceTeamsWithGoogleCalendar);
+  }
+  return normalized;
 }
 
 function replaceCommunicationAppWithSlack(text) {
