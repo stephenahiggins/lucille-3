@@ -1634,6 +1634,13 @@ test("Ollama provider treats Teams-labelled calendar surfaces as Google Calendar
               domain: null,
               isPrimary: true,
               primaryReason: "code editor"
+            },
+            {
+              name: "Microsoft Teams",
+              windowTitle: "Teams",
+              domain: "teams.microsoft.com",
+              isPrimary: false,
+              primaryReason: "Teams navigation bar visible"
             }
           ],
           primaryApplication: {

@@ -3,9 +3,11 @@ const modelPerspectiveIntentPattern = /\banaly[sz]ing\b.*\b(?:workspace|applicat
 const genericActivityPattern = /^(?:archived_screen_capture|imported_screen_capture|local_screen_capture|analy[sz]e?_?(?:local_)?screen_?frame)$/i;
 
 export function normalizeFrameWorkSummary(frame) {
-  const repositoryHostCleanup = normalizeRepositoryHostHallucinations(
-    normalizeBrowserSurfaceApplications(Array.isArray(frame.applications) ? frame.applications : [])
-  );
+  const calendarTeamsCleanup = normalizeCalendarTeamsHallucinations({
+    applications: normalizeBrowserSurfaceApplications(Array.isArray(frame.applications) ? frame.applications : []),
+    visitedUrls: frame.visitedUrls
+  });
+  const repositoryHostCleanup = normalizeRepositoryHostHallucinations(calendarTeamsCleanup.applications);
   const applications = repositoryHostCleanup.applications;
   const primaryApplication = frame.primaryApplication && applications.some((application) => application.name === frame.primaryApplication.name)
     ? frame.primaryApplication
@@ -16,7 +18,10 @@ export function normalizeFrameWorkSummary(frame) {
     ...frame,
     applications,
     primaryApplication,
-    visitedUrls: normalizeVisitedUrlsForRepositoryHostCleanup(frame.visitedUrls, repositoryHostCleanup)
+    visitedUrls: normalizeVisitedUrlsForRepositoryHostCleanup(
+      normalizeVisitedUrlsForCalendarTeamsCleanup(frame.visitedUrls, calendarTeamsCleanup),
+      repositoryHostCleanup
+    )
   };
   if (isGenericVisibleIntent(frame.visibleIntent)) {
     normalized.visibleIntent = buildVisibleIntent({ frame, primaryApplication, applications });
@@ -30,6 +35,15 @@ export function normalizeFrameWorkSummary(frame) {
       ? frame.riskFlags.map(normalizeVersionControlText)
       : frame.riskFlags;
   }
+  if (calendarTeamsCleanup.droppedTeams) {
+    normalized.visibleIntent = normalizeCalendarTeamsText(normalized.visibleIntent);
+    normalized.keyTasks = Array.isArray(normalized.keyTasks ?? frame.keyTasks)
+      ? (normalized.keyTasks ?? frame.keyTasks).map(normalizeCalendarTeamsText)
+      : normalized.keyTasks ?? frame.keyTasks;
+    normalized.riskFlags = Array.isArray(normalized.riskFlags ?? frame.riskFlags)
+      ? (normalized.riskFlags ?? frame.riskFlags).map(normalizeCalendarTeamsText)
+      : normalized.riskFlags ?? frame.riskFlags;
+  }
   if (Array.isArray(frame.activities)) {
     normalized.activities = frame.activities.map((activity) => (
       isGenericActivity(activity)
@@ -38,9 +52,32 @@ export function normalizeFrameWorkSummary(frame) {
     ));
   }
   if (Array.isArray(frame.evidence)) {
-    normalized.evidence = normalizeEvidenceForPrivacy(frame.evidence, applications);
+    const evidence = calendarTeamsCleanup.droppedTeams
+      ? frame.evidence.map((item) => ({ ...item, summary: normalizeCalendarTeamsText(item.summary) }))
+      : frame.evidence;
+    normalized.evidence = normalizeEvidenceForPrivacy(evidence, applications);
   }
   return normalized;
+}
+
+function normalizeCalendarTeamsHallucinations({ applications, visitedUrls }) {
+  const hasGoogleCalendar = applications.some((application) => application.name === "Google Calendar");
+  if (!hasGoogleCalendar) return { applications, droppedTeams: false };
+  const normalized = applications.filter((application) => (
+    application.name !== "Microsoft Teams" ||
+    application.isPrimary ||
+    hasSpecificTeamsSurface(application)
+  ));
+  return {
+    applications: normalized,
+    droppedTeams: normalized.length !== applications.length
+  };
+}
+
+function hasSpecificTeamsSurface(application) {
+  const text = `${application.windowTitle ?? ""} ${application.domain ?? ""} ${application.primaryReason ?? ""}`.toLowerCase();
+  return /\bteams\.microsoft\.com\b/.test(text) &&
+    /\b(?:chat|calls|tenant|team list|teams work|teams meeting)\b/.test(text);
 }
 
 function normalizeBrowserSurfaceApplications(applications) {
@@ -102,6 +139,19 @@ function normalizeVisitedUrlsForRepositoryHostCleanup(visitedUrls, cleanup) {
   return visitedUrls.filter((url) => {
     try {
       return new URL(url).hostname.toLowerCase() !== "gitlab.com";
+    } catch {
+      return true;
+    }
+  });
+}
+
+function normalizeVisitedUrlsForCalendarTeamsCleanup(visitedUrls, cleanup) {
+  if (!Array.isArray(visitedUrls)) return visitedUrls;
+  if (!cleanup.droppedTeams) return visitedUrls;
+  return visitedUrls.filter((url) => {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return hostname !== "teams.microsoft.com" && !hostname.endsWith(".teams.microsoft.com");
     } catch {
       return true;
     }
@@ -171,6 +221,13 @@ function normalizeVersionControlText(value) {
     .replace(/\bworking with GitLab\b/gi, "working with version control")
     .replace(/\bGitLab interface\b/gi, "version-control branch or commit UI")
     .replace(/\bGitLab\b/g, "version control");
+}
+
+function normalizeCalendarTeamsText(value) {
+  if (typeof value !== "string") return value;
+  return value
+    .replace(/\bMicrosoft Teams\b/g, "Google Calendar")
+    .replace(/\bTeams\b/g, "Google Calendar");
 }
 
 function redactCommunicationEvidence(summary) {
