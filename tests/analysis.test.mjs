@@ -2420,6 +2420,61 @@ test("frame work summary treats ambiguous Arbor chat sidebars as Slack not Disco
   assert.doesNotMatch(JSON.stringify(frame), /Discord|discord\.com/);
 });
 
+test("frame work summary treats ambiguous Arbor Teams sidebars as Slack", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-cached-teams-slack-001-raw-frame",
+    frameId: "obs-cached-teams-slack-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Google Chrome",
+      windowTitle: "GitHub",
+      domain: "github.com"
+    },
+    applications: [
+      {
+        name: "GitHub",
+        windowTitle: "arbor-education/arbor-fe-library",
+        domain: "github.com",
+        isPrimary: true,
+        primaryReason: "The GitHub interface is focused."
+      },
+      {
+        name: "Microsoft Teams",
+        windowTitle: "arbor-education",
+        domain: "teams.microsoft.com",
+        isPrimary: false,
+        primaryReason: "The Teams window is visible but not active."
+      }
+    ],
+    visitedUrls: ["https://github.com/arbor-education/arbor-fe-library/pull/3606"],
+    primaryApplication: {
+      name: "GitHub",
+      windowTitle: "arbor-education/arbor-fe-library",
+      domain: "github.com",
+      primaryReason: "The GitHub interface is focused."
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code and communication.",
+    keyTasks: ["Review engineering work and code context"],
+    evidence: [
+      {
+        id: "obs-cached-teams-slack-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A communication app is visible with team collaboration context."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["GitHub", "Slack"]);
+  assert.doesNotMatch(JSON.stringify(frame), /Microsoft Teams|teams\.microsoft\.com|\bTeams\b/);
+});
+
 test("frame work summary redacts communication notification window titles", () => {
   const frame = normalizeFrameWorkSummary({
     schemaVersion: "frame-analysis.v1",
@@ -2473,6 +2528,67 @@ test("frame work summary redacts communication notification window titles", () =
 
   assert.equal(frame.applications[1].windowTitle, "Slack notification");
   assert.doesNotMatch(JSON.stringify(frame), /message from|Lattice/);
+});
+
+test("frame work summary drops known inferred vendor URLs but keeps real visited URLs", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-inferred-vendor-urls-001-raw-frame",
+    frameId: "obs-inferred-vendor-urls-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Google Chrome",
+      windowTitle: "Smart Reports",
+      domain: "all-through.sis.local"
+    },
+    applications: [
+      {
+        name: "Google Chrome",
+        windowTitle: "Smart Reports",
+        domain: "all-through.sis.local",
+        isPrimary: true,
+        primaryReason: "The browser is focused."
+      }
+    ],
+    visitedUrls: [
+      "https://all-through.sis.local/canvas-ui/canvas/chat-id/redacted/document-mode/",
+      "https://jira.atlassian.com/browse/SIS-70412",
+      "https://github.com/arbor-education/arbor-fe-library/pull/3606",
+      "https://smartreports.com/",
+      "https://lucille-ui-recorder.com/",
+      "https://arbor-education.github.io/",
+      "https://jira.com/",
+      "https://www.adobe.com/",
+      "https://www.apple.com/"
+    ],
+    primaryApplication: {
+      name: "Google Chrome",
+      windowTitle: "Smart Reports",
+      domain: "all-through.sis.local",
+      primaryReason: "The browser is focused."
+    },
+    activities: ["browser_work"],
+    visibleIntent: "Reviewing Smart Reports in a browser.",
+    keyTasks: ["Review report output"],
+    evidence: [
+      {
+        id: "obs-inferred-vendor-urls-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A browser page is visible with report output."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.visitedUrls, [
+    "https://all-through.sis.local/canvas-ui/canvas/chat-id/redacted/document-mode/",
+    "https://jira.atlassian.com/browse/SIS-70412",
+    "https://github.com/arbor-education/arbor-fe-library/pull/3606"
+  ]);
 });
 
 test("debugFrameAnalysis analyses one frame and exposes the prompt without writing artifacts", async () => {

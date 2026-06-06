@@ -85,15 +85,24 @@ function normalizeApplicationNameAlias(name) {
 
 function normalizeCommunicationAliases(applications) {
   return applications.map((application) => {
-    if (application.name !== "Discord" || hasSpecificDiscordSurface(application) || !looksLikeSlackSurface(application)) {
-      return application;
+    if (application.name === "Slack") {
+      return {
+        ...application,
+        primaryReason: normalizeCommunicationReason(application.primaryReason)
+      };
     }
-    return {
-      ...application,
-      name: "Slack",
-      domain: application.domain?.includes("slack.com") ? application.domain : null,
-      primaryReason: replaceDiscordWithSlack(application.primaryReason)
-    };
+    if (
+      (application.name === "Discord" && !hasSpecificDiscordSurface(application) && looksLikeSlackSurface(application)) ||
+      (application.name === "Microsoft Teams" && !hasSpecificTeamsSurface(application) && looksLikeSlackSurface(application))
+    ) {
+      return {
+        ...application,
+        name: "Slack",
+        domain: application.domain?.includes("slack.com") ? application.domain : null,
+        primaryReason: normalizeCommunicationReason(application.primaryReason)
+      };
+    }
+    return application;
   });
 }
 
@@ -107,11 +116,14 @@ function looksLikeSlackSurface(application) {
   return /\b(slack|slack\.com|arbor|workspace sidebar|purple sidebar|channel sidebar|chat and activity)\b/.test(text);
 }
 
-function replaceDiscordWithSlack(text) {
+function normalizeCommunicationReason(text) {
   if (typeof text !== "string") return text;
   return text
     .replace(/\bDiscord\b/g, "Slack")
-    .replace(/\bdiscord\b/g, "Slack");
+    .replace(/\bdiscord\b/g, "Slack")
+    .replace(/\bMicrosoft Teams\b/g, "Slack")
+    .replace(/\bTeams\b/g, "Slack")
+    .replace(/\bteams\b/g, "Slack");
 }
 
 function normalizeSensitiveApplicationFields(applications) {
@@ -240,7 +252,16 @@ function normalizeVisitedUrlsForKnownHallucinations(visitedUrls) {
   return visitedUrls.filter((url) => {
     try {
       const hostname = new URL(url).hostname.toLowerCase();
-      return hostname !== "arbor.com" && hostname !== "canvas.com";
+      return ![
+        "arbor.com",
+        "canvas.com",
+        "smartreports.com",
+        "lucille-ui-recorder.com",
+        "arbor-education.github.io",
+        "jira.com",
+        "www.adobe.com",
+        "www.apple.com"
+      ].includes(hostname);
     } catch {
       return true;
     }
