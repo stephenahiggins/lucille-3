@@ -1,4 +1,5 @@
 const genericVisibleIntentPattern = /\b(?:analy[sz](?:e|ing)|review(?:ing)?)\b.*\b(?:locally imported|local)?\s*(?:screen capture|screen frame|captured frame|visible work surface)\b/i;
+const modelPerspectiveIntentPattern = /\banaly[sz]ing\b.*\b(?:workspace|applications?|tasks?)\b/i;
 const genericActivityPattern = /^(?:archived_screen_capture|imported_screen_capture|local_screen_capture|analy[sz]e?_?(?:local_)?screen_?frame)$/i;
 
 export function normalizeFrameWorkSummary(frame) {
@@ -70,7 +71,9 @@ function dedupeApplications(applications) {
   const seen = new Set();
   const deduped = [];
   for (const application of applications) {
-    const key = application.domain
+    const key = application.name === "Slack"
+      ? "slack"
+      : application.domain
       ? `${application.name ?? ""}|${application.domain}`.toLowerCase()
       : `${application.name ?? ""}|${application.windowTitle ?? ""}`.toLowerCase();
     if (seen.has(key)) continue;
@@ -106,7 +109,10 @@ function normalizeVisitedUrlsForRepositoryHostCleanup(visitedUrls, cleanup) {
 }
 
 function isGenericVisibleIntent(value) {
-  return typeof value === "string" && genericVisibleIntentPattern.test(value);
+  return typeof value === "string" && (
+    genericVisibleIntentPattern.test(value) ||
+    modelPerspectiveIntentPattern.test(value)
+  );
 }
 
 function isGenericActivity(value) {

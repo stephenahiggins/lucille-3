@@ -1980,7 +1980,7 @@ test("Ollama provider names browser surfaces from visible hostnames", async () =
       json: async () => ({
         response: JSON.stringify({
           activity: "multi_app_review",
-          visibleIntent: "reviewing multiple applications and tasks",
+          visibleIntent: "Analyzing a workspace for potential tasks and applications",
           applications: [
             {
               name: "Slack",
@@ -1988,6 +1988,13 @@ test("Ollama provider names browser surfaces from visible hostnames", async () =
               domain: null,
               isPrimary: true,
               primaryReason: "Slack is the focused foreground window."
+            },
+            {
+              name: "Slack",
+              windowTitle: "Slack web",
+              domain: "arbor-education.slack.com",
+              isPrimary: false,
+              primaryReason: "Slack web surface is also visible."
             },
             {
               name: "Browser",
@@ -2036,6 +2043,7 @@ test("Ollama provider names browser surfaces from visible hostnames", async () =
     .map((line) => JSON.parse(line))[0];
 
   assert.deepEqual(frame.applications.map((application) => application.name), ["Slack", "LinkedIn", "GitHub"]);
+  assert.equal(frame.visibleIntent, "Draft or review follow-up communication in Slack with LinkedIn and GitHub also visible.");
   assert.equal(frame.applications.filter((application) => application.name === "LinkedIn").length, 1);
   assert.deepEqual(frame.visitedUrls, [
     "https://www.linkedin.com/feed/",
