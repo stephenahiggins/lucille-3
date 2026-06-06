@@ -3,7 +3,7 @@ const genericActivityPattern = /^(?:archived_screen_capture|imported_screen_capt
 
 export function normalizeFrameWorkSummary(frame) {
   const repositoryHostCleanup = normalizeRepositoryHostHallucinations(
-    Array.isArray(frame.applications) ? frame.applications : []
+    normalizeBrowserSurfaceApplications(Array.isArray(frame.applications) ? frame.applications : [])
   );
   const applications = repositoryHostCleanup.applications;
   const primaryApplication = frame.primaryApplication && applications.some((application) => application.name === frame.primaryApplication.name)
@@ -40,6 +40,44 @@ export function normalizeFrameWorkSummary(frame) {
     normalized.evidence = normalizeEvidenceForPrivacy(frame.evidence, applications);
   }
   return normalized;
+}
+
+function normalizeBrowserSurfaceApplications(applications) {
+  return dedupeApplications(applications.map((application) => {
+    if (!/^browser$/i.test(application.name)) {
+      return application;
+    }
+    const name = browserSurfaceName(application.domain ?? application.windowTitle);
+    if (!name) return application;
+    return {
+      ...application,
+      name,
+      domain: name === "GitHub" ? "github.com" : application.domain
+    };
+  }));
+}
+
+function browserSurfaceName(value) {
+  const text = String(value ?? "").toLowerCase();
+  if (/(^|\.)github\.com\b|\bgithub\b/.test(text)) return "GitHub";
+  if (/(^|\.)linkedin\.com\b|\blinkedin\b/.test(text)) return "LinkedIn";
+  if (/(^|\.)(google\.com|google\.co\.)\b|\bgoogle\b/.test(text)) return "Google";
+  if (/(^|\.)temu\.com\b|\btemu\b/.test(text)) return "Temu";
+  return null;
+}
+
+function dedupeApplications(applications) {
+  const seen = new Set();
+  const deduped = [];
+  for (const application of applications) {
+    const key = application.domain
+      ? `${application.name ?? ""}|${application.domain}`.toLowerCase()
+      : `${application.name ?? ""}|${application.windowTitle ?? ""}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(application);
+  }
+  return deduped;
 }
 
 function normalizeRepositoryHostHallucinations(applications) {

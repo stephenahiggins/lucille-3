@@ -8,8 +8,8 @@ import { normalizeFrameWorkSummary } from "./frameWorkSummary.mjs";
 
 const defaultEndpoint = "http://127.0.0.1:11434";
 const imageExtensions = [".png", ".jpg", ".jpeg", ".webp"];
-const maxModelImageDimension = 1536;
-const modelRequestTimeoutMs = 120_000;
+const modelImageDimensions = [1536, 1024, 768];
+const modelRequestTimeoutMs = 240_000;
 
 export class LocalVisualProviderUnavailable extends Error {
   constructor(message) {
@@ -35,21 +35,36 @@ export async function analyseObservationWithOllama(options = {}) {
   const observation = options.observation;
   const evidenceNumber = Number(options.evidenceNumber);
   const mediaPath = resolveLocalRawMediaPath({ root, day, observation });
-  const preparedImage = prepareModelImage(mediaPath);
-  const imageBase64 = readFileSync(preparedImage.path, "base64");
-  preparedImage.cleanup();
-  const body = buildOllamaRequest({ model, observation, imageBase64 });
 
   let response;
-  try {
-    response = await fetchWithTimeout(fetchImpl, `${endpoint}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }, modelRequestTimeoutMs);
-  } catch (error) {
+  let lastRequestError = null;
+  for (const [index, maxDimension] of modelImageDimensions.entries()) {
+    const preparedImage = prepareModelImage(mediaPath, maxDimension);
+    const imageBase64 = readFileSync(preparedImage.path, "base64");
+    preparedImage.cleanup();
+    const body = buildOllamaRequest({ model, observation, imageBase64, maxDimension });
+
+    try {
+      response = await fetchWithTimeout(fetchImpl, `${endpoint}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }, modelRequestTimeoutMs);
+      lastRequestError = null;
+      break;
+    } catch (error) {
+      lastRequestError = error;
+      if (!isAbortLikeError(error) || index === modelImageDimensions.length - 1) {
+        throw new LocalVisualProviderUnavailable(
+          `Ollama provider is unavailable at ${endpoint}: ${error.message}`
+        );
+      }
+    }
+  }
+
+  if (lastRequestError) {
     throw new LocalVisualProviderUnavailable(
-      `Ollama provider is unavailable at ${endpoint}: ${error.message}`
+      `Ollama provider is unavailable at ${endpoint}: ${lastRequestError.message}`
     );
   }
 
@@ -105,16 +120,16 @@ async function fetchWithTimeout(fetchImpl, url, options, timeoutMs) {
   }
 }
 
-function prepareModelImage(mediaPath) {
+function prepareModelImage(mediaPath, maxDimension) {
   const dimensions = imageDimensions(mediaPath);
-  if (!dimensions || Math.max(dimensions.width, dimensions.height) <= maxModelImageDimension) {
+  if (!dimensions || Math.max(dimensions.width, dimensions.height) <= maxDimension) {
     return { path: mediaPath, cleanup: () => {} };
   }
 
   const tempDir = mkdtempSync(path.join(os.tmpdir(), "lucille-model-frame-"));
   const outputPath = path.join(tempDir, "frame.png");
   try {
-    execFileSync("sips", ["-s", "format", "png", "-Z", String(maxModelImageDimension), mediaPath, "--out", outputPath], {
+    execFileSync("sips", ["-s", "format", "png", "-Z", String(maxDimension), mediaPath, "--out", outputPath], {
       stdio: "ignore"
     });
     return {
@@ -168,14 +183,18 @@ export function buildOllamaPrompt({ observation }) {
   ].join(" ");
 }
 
-export function buildOllamaRequest({ model, observation, imageBase64 }) {
+export function buildOllamaRequest({ model, observation, imageBase64, maxDimension = modelImageDimensions[0] }) {
   return {
     model,
     stream: false,
     format: "json",
-    prompt: buildOllamaPrompt({ observation }),
+    prompt: `${buildOllamaPrompt({ observation })} Local image max dimension for this attempt: ${maxDimension}px.`,
     images: [imageBase64]
   };
+}
+
+function isAbortLikeError(error) {
+  return error?.name === "AbortError" || /aborted|abort|timeout|timed out/i.test(String(error?.message ?? ""));
 }
 
 function parseOllamaResponse(payload) {

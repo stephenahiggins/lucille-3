@@ -1102,6 +1102,77 @@ test("Ollama provider sends only day-scoped local raw media and persists structu
   assert.doesNotThrow(() => assertPrivacySafe(patterns, "ollamaPatterns"));
 });
 
+test("Ollama provider retries a timed-out local image request at fallback size", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-retry-001.png"), "local retry image");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-retry-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Cursor",
+      windowTitle: "Lucille project workspace",
+      domain: null,
+      activity: "code_editing",
+      visibleTextSummary: "A visible screen frame was captured for local analysis.",
+      redactedSignals: ["explicit local capture"],
+      evidenceIds: ["obs-retry-001-raw-frame"]
+    }) + "\n"
+  );
+
+  const attempts = [];
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      attempts.push(body.prompt);
+      if (attempts.length === 1) {
+        throw new Error("This operation was aborted");
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: JSON.stringify({
+            activity: "code_review",
+            visibleIntent: "Reviewing local code.",
+            applications: [
+              {
+                name: "Cursor",
+                windowTitle: "Lucille project workspace",
+                domain: null,
+                isPrimary: true,
+                primaryReason: "The editor is the focused window."
+              }
+            ],
+            primaryApplication: {
+              name: "Cursor",
+              windowTitle: "Lucille project workspace",
+              domain: null,
+              primaryReason: "The editor is the focused window."
+            },
+            visitedUrls: [],
+            keyTasks: ["Review engineering work and code context"],
+            evidenceSummaries: ["Cursor shows a local code workspace."],
+            riskFlags: []
+          })
+        })
+      };
+    }
+  });
+
+  assert.equal(attempts.length, 2);
+  assert.match(attempts[0], /1536px/);
+  assert.match(attempts[1], /1024px/);
+});
+
 test("Ollama provider differentiates Discord Slack and Microsoft Teams applications", async () => {
   const root = fixtureRoot();
   const captureDir = path.join(root, "storage", "captures", "2026-05-30");
@@ -1874,6 +1945,104 @@ test("Ollama provider drops GitLab hallucination from local Git tooling", async 
   assert.deepEqual(frame.visitedUrls, []);
   assert.doesNotMatch(JSON.stringify(frame), /GitLab|gitlab\\.com/);
   assert.match(JSON.stringify(frame), /version control/);
+});
+
+test("Ollama provider names browser surfaces from visible hostnames", async () => {
+  const root = fixtureRoot();
+  const captureDir = path.join(root, "storage", "captures", "2026-05-30");
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  writeFileSync(path.join(rawMediaDir, "obs-browser-surfaces-001.png"), "local browser surfaces screenshot");
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    JSON.stringify({
+      schemaVersion: "observation.v1",
+      id: "obs-browser-surfaces-001",
+      capturedAt: "2026-05-30T09:00:00.000Z",
+      appName: "Unknown",
+      windowTitle: "Imported archived capture",
+      domain: null,
+      activity: "archived_screen_capture",
+      visibleTextSummary: "A visible screen frame was imported from the Downloads Archive for local Lucille analysis.",
+      redactedSignals: ["day-scoped local raw media"],
+      evidenceIds: ["obs-browser-surfaces-001-raw-frame"]
+    }) + "\n"
+  );
+
+  await runAnalysis({
+    root,
+    day: "2026-05-30",
+    model: "moondream:1.8b",
+    provider: "ollama",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: JSON.stringify({
+          activity: "multi_app_review",
+          visibleIntent: "reviewing multiple applications and tasks",
+          applications: [
+            {
+              name: "Slack",
+              windowTitle: "Arbor",
+              domain: null,
+              isPrimary: true,
+              primaryReason: "Slack is the focused foreground window."
+            },
+            {
+              name: "Browser",
+              windowTitle: "LinkedIn",
+              domain: "www.linkedin.com",
+              isPrimary: false,
+              primaryReason: "LinkedIn page is visible."
+            },
+            {
+              name: "Browser",
+              windowTitle: "GitHub",
+              domain: "github.com",
+              isPrimary: false,
+              primaryReason: "GitHub page is visible."
+            },
+            {
+              name: "Browser",
+              windowTitle: "Browser",
+              domain: "www.linkedin.com",
+              isPrimary: false,
+              primaryReason: "Duplicate LinkedIn page is visible."
+            }
+          ],
+          primaryApplication: {
+            name: "Slack",
+            windowTitle: "Arbor",
+            domain: null,
+            primaryReason: "Slack is the focused foreground window."
+          },
+          visitedUrls: ["https://www.linkedin.com/feed/", "https://github.com/org/repo/pull/1"],
+          keyTasks: ["Review engineering work and code context"],
+          evidenceSummaries: [
+            "Slack workspace is visible.",
+            "LinkedIn feed is visible.",
+            "GitHub pull request page is visible."
+          ],
+          riskFlags: []
+        })
+      })
+    })
+  });
+
+  const frame = readFileSync(path.join(root, "storage", "analysis", "2026-05-30", "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))[0];
+
+  assert.deepEqual(frame.applications.map((application) => application.name), ["Slack", "LinkedIn", "GitHub"]);
+  assert.equal(frame.applications.filter((application) => application.name === "LinkedIn").length, 1);
+  assert.deepEqual(frame.visitedUrls, [
+    "https://www.linkedin.com/feed/",
+    "https://github.com/org/repo/pull/1",
+    "https://www.linkedin.com/",
+    "https://github.com/"
+  ]);
 });
 
 test("debugFrameAnalysis analyses one frame and exposes the prompt without writing artifacts", async () => {
