@@ -953,7 +953,7 @@ function inferRecommendationFromTask(task) {
   const seed = task.recommendationSeeds[0] ?? "Generate a reviewable AI assistance experiment for this workflow";
   const hurdle = task.cognitiveHurdles[0] ?? "the next action is not obvious from scattered work surfaces";
   return truncateText(
-    `${seed}. Focus the recommendation on overcoming this repeated-task hurdle: ${hurdle.toLowerCase()}. Cite ${task.evidenceIds.join(", ")} so the employee can approve or correct the interpretation.`,
+    `${seed}. Turn it into a reviewed checklist, shortcut, or skill that reduces ${hurdle.toLowerCase()} and asks the employee to approve or correct the recommendation before reuse.`,
     600
   );
 }
