@@ -2939,6 +2939,7 @@ test("frame work summary drops known inferred vendor URLs but keeps real visited
       "https://arbor.allscan.net/",
       "https://music.apple.com/",
       "https://github.com/arbor-education/arbor-education/pull/3606",
+      "https://github.com/arbor-education/arbor-fe-library/pull/3806",
       "https://github.com/username/repo",
       "https://github.com/username/repo/pull/123",
       "https://gitkraken.com/",
@@ -2971,6 +2972,212 @@ test("frame work summary drops known inferred vendor URLs but keeps real visited
     "https://all-through.sis.local/canvas-ui/canvas/chat-id/redacted/document-mode/",
     "https://jira.atlassian.com/browse/SIS-70412",
     "https://github.com/arbor-education/arbor-fe-library/pull/3606"
+  ]);
+});
+
+test("frame work summary normalizes known GitHub PR OCR aliases in URLs and titles", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-pr-ocr-alias-001-raw-frame",
+    frameId: "obs-pr-ocr-alias-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Google Chrome",
+      windowTitle: "MIS-71371 Adjust smart reports frontend #3806",
+      domain: "github.com"
+    },
+    applications: [
+      {
+        name: "GitHub",
+        windowTitle: "MIS-71371 Adjust smart reports frontend #3806",
+        domain: "github.com",
+        isPrimary: true,
+        primaryReason: "The GitHub pull request window is focused."
+      },
+      {
+        name: "Visual Studio Code",
+        windowTitle: "Visual Studio Code",
+        domain: null,
+        isPrimary: false,
+        primaryReason: "The editor is visible."
+      }
+    ],
+    visitedUrls: [
+      "https://github.com/arbor-education/arbor-fe-library/pull/3806",
+      "https://github.com/arbor-education/arbor-fe-library/pull/3606"
+    ],
+    primaryApplication: {
+      name: "GitHub",
+      windowTitle: "MIS-71371 Adjust smart reports frontend #3806",
+      domain: "github.com",
+      primaryReason: "The GitHub pull request window is focused."
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code changes for a pull request.",
+    keyTasks: ["Review engineering work and code context"],
+    evidence: [
+      {
+        id: "obs-pr-ocr-alias-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "A GitHub pull request is visible."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.visitedUrls, ["https://github.com/arbor-education/arbor-fe-library/pull/3606"]);
+  assert.equal(frame.applications[0].windowTitle, "MIS-71371 Adjust smart reports frontend #3606");
+  assert.equal(frame.primaryApplication.windowTitle, "MIS-71371 Adjust smart reports frontend #3606");
+});
+
+test("frame work summary drops unbacked fake browser surfaces while keeping backed browser apps", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-unbacked-browser-001-raw-frame",
+    frameId: "obs-unbacked-browser-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Cursor",
+      windowTitle: "Cursor",
+      domain: null
+    },
+    applications: [
+      {
+        name: "Cursor",
+        windowTitle: "Cursor",
+        domain: null,
+        isPrimary: true,
+        primaryReason: "Cursor is focused."
+      },
+      {
+        name: "Browser",
+        windowTitle: "Arbor",
+        domain: "arbor.com",
+        isPrimary: false,
+        primaryReason: "The browser is open to the Arbor website."
+      },
+      {
+        name: "Google Chrome",
+        windowTitle: "New Chrome available",
+        domain: "chrome.com",
+        isPrimary: false,
+        primaryReason: "A generic Chrome update surface is visible."
+      },
+      {
+        name: "Google Chrome",
+        windowTitle: "Google Search",
+        domain: "www.google.com",
+        isPrimary: false,
+        primaryReason: "A real Google search page is visible."
+      },
+      {
+        name: "GitHub",
+        windowTitle: "arbor-education/arbor-fe-library/pull/3606",
+        domain: "github.com",
+        isPrimary: false,
+        primaryReason: "GitHub is visible."
+      }
+    ],
+    visitedUrls: [
+      "https://www.google.com/search",
+      "https://github.com/arbor-education/arbor-fe-library/pull/3606",
+      "https://smartreports.com/"
+    ],
+    primaryApplication: {
+      name: "Cursor",
+      windowTitle: "Cursor",
+      domain: null,
+      primaryReason: "Cursor is focused."
+    },
+    activities: ["code_review"],
+    visibleIntent: "Reviewing code while browser tabs are visible.",
+    keyTasks: ["Review engineering work and code context"],
+    evidence: [
+      {
+        id: "obs-unbacked-browser-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "Cursor and browser windows are visible."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.applications.map((application) => application.name), [
+    "Cursor",
+    "Google Chrome",
+    "GitHub"
+  ]);
+  assert.deepEqual(frame.visitedUrls, [
+    "https://www.google.com/search",
+    "https://github.com/arbor-education/arbor-fe-library/pull/3606"
+  ]);
+});
+
+test("frame work summary rewrites Google root to privacy-safe search URL when search results are visible", () => {
+  const frame = normalizeFrameWorkSummary({
+    schemaVersion: "frame-analysis.v1",
+    evidenceId: "obs-google-search-root-001-raw-frame",
+    frameId: "obs-google-search-root-001",
+    day: "2026-05-30",
+    capturedAt: "2026-05-30T09:00:00.000Z",
+    provider: "ollama",
+    model: "qwen2.5vl:7b",
+    surface: {
+      appName: "Google Chrome",
+      windowTitle: "Google",
+      domain: "google.com"
+    },
+    applications: [
+      {
+        name: "Google Chrome",
+        windowTitle: "Google",
+        domain: "google.com",
+        isPrimary: true,
+        primaryReason: "Foreground browser window."
+      },
+      {
+        name: "Visual Studio Code",
+        windowTitle: "CanvasController.php",
+        domain: null,
+        isPrimary: false,
+        primaryReason: "The editor is visible."
+      }
+    ],
+    visitedUrls: [
+      "https://google.com/",
+      "https://www.redbubble.com/"
+    ],
+    primaryApplication: {
+      name: "Google Chrome",
+      windowTitle: "Google",
+      domain: "google.com",
+      primaryReason: "Foreground browser window."
+    },
+    activities: ["browser_work"],
+    visibleIntent: "Reviewing Google search results while code is visible.",
+    keyTasks: ["searching for resources"],
+    evidence: [
+      {
+        id: "obs-google-search-root-001-local-visual-01",
+        kind: "local_visual_summary",
+        summary: "The browser shows Google search results for a visible query."
+      }
+    ],
+    redactions: [],
+    riskFlags: []
+  });
+
+  assert.deepEqual(frame.visitedUrls, [
+    "https://www.google.com/search",
+    "https://www.redbubble.com/"
   ]);
 });
 

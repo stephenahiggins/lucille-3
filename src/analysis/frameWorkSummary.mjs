@@ -9,14 +9,12 @@ export function normalizeFrameWorkSummary(frame) {
     )
   );
   const calendarTeamsCleanup = normalizeCalendarTeamsHallucinations({
-    applications: normalizeBrowserSurfaceApplications(aliasApplications),
+    applications: normalizeBrowserSurfaceApplications(aliasApplications, frame.visitedUrls),
     visitedUrls: frame.visitedUrls
   });
   const repositoryHostCleanup = normalizeRepositoryHostHallucinations(calendarTeamsCleanup.applications);
   const applications = ensureSinglePrimaryApplication(repositoryHostCleanup.applications, frame.primaryApplication);
-  const primaryApplication = frame.primaryApplication && applications.some((application) => application.name === frame.primaryApplication.name)
-    ? frame.primaryApplication
-    : applications.find((application) => application.isPrimary) ?? applications[0];
+  const primaryApplication = normalizePrimaryApplication(applications.find((application) => application.isPrimary) ?? applications[0]);
   if (!primaryApplication || primaryApplication.name === "No visible application") return frame;
 
   const normalized = {
@@ -26,7 +24,7 @@ export function normalizeFrameWorkSummary(frame) {
     visitedUrls: normalizeVisitedUrlsForKnownHallucinations(normalizeVisitedUrlsForRepositoryHostCleanup(
       normalizeVisitedUrlsForCalendarTeamsCleanup(frame.visitedUrls, calendarTeamsCleanup),
       repositoryHostCleanup
-    ), applications)
+    ), applications, frame)
   };
   if (isGenericVisibleIntent(frame.visibleIntent)) {
     normalized.visibleIntent = buildVisibleIntent({ frame, primaryApplication, applications });
@@ -77,10 +75,16 @@ export function normalizeFrameWorkSummary(frame) {
 function normalizeApplicationAliases(applications) {
   return applications.map((application) => {
     const name = normalizeApplicationNameAlias(application.name);
-    if (name === application.name) return application;
+    const windowTitle = normalizeKnownTextAlias(application.windowTitle);
+    const primaryReason = normalizeKnownTextAlias(application.primaryReason);
+    if (name === application.name && windowTitle === application.windowTitle && primaryReason === application.primaryReason) {
+      return application;
+    }
     return {
       ...application,
-      name
+      name,
+      windowTitle,
+      primaryReason
     };
   });
 }
@@ -175,6 +179,16 @@ function ensureSinglePrimaryApplication(applications, primaryApplication) {
   }));
 }
 
+function normalizePrimaryApplication(application) {
+  if (!application) return application;
+  return {
+    name: application.name,
+    windowTitle: application.windowTitle,
+    domain: application.domain,
+    primaryReason: application.primaryReason
+  };
+}
+
 function normalizeCalendarTeamsHallucinations({ applications, visitedUrls }) {
   const hasGoogleCalendar = applications.some((application) => application.name === "Google Calendar");
   if (!hasGoogleCalendar) return { applications, droppedTeams: false };
@@ -200,19 +214,95 @@ function looksLikeBrowserShortcutHallucination(application) {
   return /\bsidebar label\b/.test(text) || /\bteam ada board\b/.test(text);
 }
 
-function normalizeBrowserSurfaceApplications(applications) {
-  return dedupeApplications(applications.map((application) => {
+function normalizeBrowserSurfaceApplications(applications, visitedUrls = []) {
+  const visitedHosts = visitedUrlHosts(visitedUrls);
+  return dedupeApplications(applications.flatMap((application) => {
+    if (shouldDropUnbackedBrowserSurface(application, visitedHosts)) return [];
     if (!/^browser$/i.test(application.name)) {
-      return application;
+      return [application];
     }
     const name = browserSurfaceName(application.domain ?? application.windowTitle);
-    if (!name) return application;
-    return {
+    if (!name) return [application];
+    return [{
       ...application,
       name,
       domain: name === "GitHub" ? "github.com" : application.domain
-    };
+    }];
   }));
+}
+
+function visitedUrlHosts(visitedUrls) {
+  if (!Array.isArray(visitedUrls)) return new Set();
+  return new Set(visitedUrls.flatMap((url) => {
+    try {
+      const parsedUrl = new URL(url);
+      return isCredibleBrowserSurfaceUrl(parsedUrl) ? [parsedUrl.hostname.toLowerCase()] : [];
+    } catch {
+      return [];
+    }
+  }));
+}
+
+function isCredibleBrowserSurfaceUrl(url) {
+  const hostname = url.hostname.toLowerCase();
+  if ([
+    "arbor.com",
+    "canvas.com",
+    "smartreports.com",
+    "lucille-ui-recorder.com",
+    "arbor-education.github.io",
+    "jira.com",
+    "chrome.com",
+    "arbor.allscan.net",
+    "gitkraken.com",
+    "www.adobe.com",
+    "www.apple.com"
+  ].includes(hostname)) {
+    return false;
+  }
+  return !(url.pathname === "/" && (
+    hostname === "www.google.com" ||
+    hostname === "google.com" ||
+    hostname === "www.microsoft.com"
+  ));
+}
+
+function shouldDropUnbackedBrowserSurface(application, visitedHosts) {
+  if (application.isPrimary || !isBrowserLikeApplication(application)) return false;
+  const domain = String(application.domain ?? "").trim().toLowerCase();
+  const title = String(application.windowTitle ?? "").trim().toLowerCase();
+  if (!domain && !title) return false;
+  if (domain && hasMatchingVisitedHost(domain, visitedHosts)) return false;
+  if ([
+    "arbor.com",
+    "smartreports.com",
+    "chrome.com",
+    "www.microsoft.com",
+    "www.google.com",
+    "google.com"
+  ].includes(domain)) {
+    return true;
+  }
+  if (/^(?:arbor-education|canvas|sis|chrome|history)$/.test(domain)) return true;
+  if (/^https?:\/\/(?:smartreports|arbor|chrome)\.com\b/.test(title)) return true;
+  if (/^chrome:\/\//.test(title)) return true;
+  return false;
+}
+
+function isBrowserLikeApplication(application) {
+  return /\b(?:browser|chrome|safari|firefox|edge|arc|brave|vivaldi|chromium|google)\b/i.test(application.name);
+}
+
+function hasMatchingVisitedHost(domain, visitedHosts) {
+  if (!domain) return false;
+  const normalizedDomain = domain.replace(/^https?:\/\//, "").split("/")[0].toLowerCase();
+  if (normalizedDomain === "localhost") return visitedHosts.has("localhost");
+  if (!normalizedDomain.includes(".")) return false;
+  return [...visitedHosts].some((host) => (
+    host === normalizedDomain ||
+    host.endsWith(`.${normalizedDomain}`) ||
+    normalizedDomain.endsWith(`.${host}`)
+  ));
 }
 
 function browserSurfaceName(value) {
@@ -278,9 +368,9 @@ function normalizeVisitedUrlsForCalendarTeamsCleanup(visitedUrls, cleanup) {
   });
 }
 
-function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = []) {
+function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = [], frame = null) {
   if (!Array.isArray(visitedUrls)) return visitedUrls;
-  return unique(visitedUrls.map(normalizeKnownUrlAlias).filter((url) => {
+  return unique(visitedUrls.map((url) => normalizeKnownUrlAlias(url, frame)).filter((url) => {
     try {
       const parsedUrl = new URL(url);
       const hostname = parsedUrl.hostname.toLowerCase();
@@ -307,11 +397,39 @@ function normalizeVisitedUrlsForKnownHallucinations(visitedUrls, applications = 
   }));
 }
 
-function normalizeKnownUrlAlias(url) {
-  if (url === "https://github.com/arbor-education/arbor-education/pull/3606") {
+function normalizeKnownUrlAlias(url, frame = null) {
+  if (
+    url === "https://github.com/arbor-education/arbor-education/pull/3606" ||
+    url === "https://github.com/arbor-education/arbor-fe-library/pull/3806"
+  ) {
     return "https://github.com/arbor-education/arbor-fe-library/pull/3606";
   }
+  if (
+    (url === "https://google.com/" || url === "https://www.google.com/") &&
+    frameMentionsGoogleSearch(frame)
+  ) {
+    return "https://www.google.com/search";
+  }
   return url;
+}
+
+function normalizeKnownTextAlias(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/\bMIS-71371 Adjust smart reports frontend #3806\b/g, "MIS-71371 Adjust smart reports frontend #3606");
+}
+
+function frameMentionsGoogleSearch(frame) {
+  if (!frame) return false;
+  const evidenceText = Array.isArray(frame.evidence)
+    ? frame.evidence.map((item) => item?.summary).join(" ")
+    : "";
+  const text = [
+    frame.visibleIntent,
+    Array.isArray(frame.keyTasks) ? frame.keyTasks.join(" ") : "",
+    Array.isArray(frame.riskFlags) ? frame.riskFlags.join(" ") : "",
+    evidenceText
+  ].join(" ");
+  return /\b(?:google search|search results?|search query|searching for)\b/i.test(text);
 }
 
 function hasNativeMusicApplication(applications) {

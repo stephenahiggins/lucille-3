@@ -331,10 +331,7 @@ function validatePattern(value, source) {
 function renderReport({ day, frames, activityTimeline, sessionAnalysis, workPatterns, proposalSet, taskSkillSummary, memoryUpdate, optimizationWrapUp }) {
   const lifecycle = workPatterns.synthesis.rawMediaLifecycle;
   const totalWeeklyMinutes = workPatterns.patterns.reduce((sum, pattern) => sum + pattern.estimatedMinutesPerWeek, 0);
-  const captureSurfaces = frames.map((frame) => {
-    const domain = frame.surface.domain ? `, ${frame.surface.domain}` : "";
-    return `- ${frame.capturedAt}: ${frame.surface.appName} (${frame.surface.windowTitle}${domain})`;
-  }).join("\n");
+  const analysedSurfaces = renderAnalysedSurfaceSummary(frames);
   const patterns = workPatterns.patterns.map((pattern) => (
     `## Efficiency Opportunity: ${pattern.title}
 
@@ -345,7 +342,7 @@ ${pattern.summary}
 - Suggested action: ${pattern.recommendation}
 - Organisation signal: ${pattern.enterpriseSignal}
 - Evidence count: ${pattern.evidenceCount} frame(s) across ${pattern.segmentCount} segment(s)
-- Representative evidence: ${pattern.repeatedAcrossEvidence.join(", ")}
+- Representative evidence: ${formatEvidenceList(pattern.repeatedAcrossEvidence)}
 - Signals: ${pattern.signals.join("; ")}
 - Privacy boundary: ${pattern.privacyBoundary}`
   )).join("\n\n");
@@ -361,12 +358,12 @@ ${pattern.summary}
 - Common actions: ${task.commonActions.join("; ")}
 - Cognitive hurdles: ${task.cognitiveHurdles.join("; ") || "No major friction signal visible"}
 - Recommendation seeds: ${task.recommendationSeeds.join("; ")}
-- Representative evidence: ${task.evidenceIds.join(", ")}
+- Representative evidence: ${formatEvidenceList(task.evidenceIds)}
 
 Frame-backed task trail:
-${task.evidenceTrail.map((entry) => (
+${task.evidenceTrail.slice(0, 8).map((entry) => (
   `- ${entry.evidenceId} (${entry.capturedAt}, ${entry.surface}): ${entry.keyTasks.join("; ")} | signals: ${entry.signals.join("; ")}`
-)).join("\n")}`
+)).join("\n")}${task.evidenceTrail.length > 8 ? `\n- ... ${task.evidenceTrail.length - 8} more frame-backed item(s) retained in activity-timeline.json` : ""}`
   )).join("\n\n");
   const timeline = activityTimeline.segments.map((segment) => (
     `### ${segment.title}
@@ -377,8 +374,8 @@ ${task.evidenceTrail.map((entry) => (
 - Actions taken: ${segment.actionsTaken.join("; ")}
 - Cognitive hurdles: ${segment.cognitiveHurdles.join("; ") || "No major friction signal visible"}
 - Recommendation seeds: ${segment.recommendationSeeds.join("; ")}
-- Evidence: ${segment.evidenceIds.join(", ")}
-- Frame tasks: ${segment.evidenceTrail.map((entry) => `${entry.evidenceId}: ${entry.keyTasks.join("; ")}`).join(" | ")}`
+- Evidence: ${formatEvidenceList(segment.evidenceIds)}
+- Frame tasks: ${segment.evidenceTrail.slice(0, 4).map((entry) => `${entry.evidenceId}: ${entry.keyTasks.join("; ")}`).join(" | ")}${segment.evidenceTrail.length > 4 ? ` | ... ${segment.evidenceTrail.length - 4} more retained in activity-timeline.json` : ""}`
   )).join("\n\n");
   const taskSkillMatches = taskSkillSummary.commonTasks.map((task) => (
     `### ${task.title}
@@ -405,7 +402,7 @@ ${proposal.summary}
 - Estimated weekly time saving: ${proposal.estimatedMinutesPerWeek} minutes
 - Expected outcome: ${proposal.expectedOutcome}
 - Rollout metric: ${proposal.rolloutMetric}
-- Evidence: ${proposal.evidenceIds.join(", ")}
+- Evidence: ${formatEvidenceList(proposal.evidenceIds)}
 - Confidence: ${proposal.confidence}
 
 Implementation steps:
@@ -424,7 +421,7 @@ ${proposal.prerequisites.map((item) => `- ${item}`).join("\n")}`
     ? renderMemorySection(memoryUpdate)
     : "Memory update artifact was not available for this report run.";
 
-  return `# Lucille Weekly Efficiency Report: ${day}
+  return sanitizeReportDisplayText(`# Lucille Weekly Efficiency Report: ${day}
 
 ## Summary
 
@@ -449,9 +446,9 @@ ${wrapUpSection}
 
 ${memorySection}
 
-## Capture Surfaces
+## Analysed Surfaces
 
-${captureSurfaces}
+${analysedSurfaces}
 
 ## Raw Media Lifecycle
 
@@ -498,7 +495,14 @@ ${proposals}
 ## Privacy Notes
 
 This report is generated from structured analysis artifacts only. It does not include raw screenshots, raw media paths, keystrokes, clipboard contents, audio, passwords, cookies, authentication tokens, full URLs with query strings, raw document bodies, or raw message bodies.
-`;
+`);
+}
+
+function sanitizeReportDisplayText(markdown) {
+  return markdown
+    .replace(/\bNo visible application: Imported archived capture\b/g, "No visible application: no visible work surface")
+    .replace(/\bImported archived capture\b/g, "analysed frame")
+    .replace(/\bArchived capture\b/g, "analysed frame");
 }
 
 function renderWrapUpSection(wrapUp) {
@@ -509,12 +513,12 @@ ${wrapUp.efficiencyRecommendations.map((recommendation, index) => (
   `${index + 1}. ${recommendation.title} (${recommendation.type}, confidence ${recommendation.confidence}, saves ${recommendation.estimatedMinutesPerWeek} min/week)
    - Why: ${recommendation.whyItMatters}
    - Action: ${recommendation.suggestedAction}
-   - Evidence: ${recommendation.evidenceIds.join(", ")}`
+   - Evidence: ${formatEvidenceList(recommendation.evidenceIds)}`
 )).join("\n")}
 
 Software tips:
 ${wrapUp.softwareTips.map((tip) => (
-  `- ${tip.title}: ${tip.tip} Evidence: ${tip.evidenceIds.join(", ")}`
+  `- ${tip.title}: ${tip.tip} Evidence: ${formatEvidenceList(tip.evidenceIds, 6)}`
 )).join("\n")}
 
 Procrastination estimate: ${wrapUp.procrastinationEstimate.classification}, ${wrapUp.procrastinationEstimate.estimatedMinutes} minute(s). ${wrapUp.procrastinationEstimate.summary}
@@ -539,6 +543,53 @@ ${memoryUpdate.dayProfile.taskSignals.map((task) => (
 )).join("\n")}`;
 }
 
+function renderAnalysedSurfaceSummary(frames) {
+  const appCounts = new Map();
+  const primaryCounts = new Map();
+  const urlCounts = new Map();
+  for (const frame of frames) {
+    for (const application of frame.applications) {
+      increment(appCounts, application.name);
+      if (application.isPrimary) increment(primaryCounts, application.name);
+    }
+    for (const url of frame.visitedUrls) {
+      increment(urlCounts, url);
+    }
+  }
+  const topApplications = topEntries(appCounts, 12).map(([name, count]) => {
+    const primaryCount = primaryCounts.get(name) ?? 0;
+    return `- ${name}: visible in ${count} frame(s), primary in ${primaryCount} frame(s)`;
+  }).join("\n");
+  const topUrls = topEntries(urlCounts, 12).map(([url, count]) => (
+    `- ${url}: visible in ${count} frame(s)`
+  )).join("\n");
+  return `- Frames with analysed applications: ${frames.filter((frame) => frame.applications.length > 0).length}/${frames.length}
+- Frames with one primary application: ${frames.filter((frame) => frame.applications.filter((application) => application.isPrimary).length === 1).length}/${frames.length}
+- Frames with visited URL arrays: ${frames.filter((frame) => Array.isArray(frame.visitedUrls)).length}/${frames.length}
+
+Top applications:
+${topApplications || "- No applications detected"}
+
+Top visited URLs:
+${topUrls || "- No browser URLs detected"}`;
+}
+
+function increment(map, key) {
+  if (!key) return;
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function topEntries(map, limit) {
+  return [...map.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, limit);
+}
+
+function formatEvidenceList(evidenceIds, limit = 12) {
+  if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) return "None";
+  const visible = evidenceIds.slice(0, limit).join(", ");
+  const remaining = evidenceIds.length - limit;
+  return remaining > 0 ? `${visible}, ... ${remaining} more` : visible;
+}
+
 function renderSessionSection(sessionAnalysis) {
   return `Session artifact: ${sessionAnalysis.schemaVersion}
 
@@ -560,7 +611,7 @@ ${sessionAnalysis.sessions.map((session) => (
 - Applications: ${session.applications.map((item) => `${item.name} (${item.count})`).join(", ")}
 - URLs: ${session.visitedUrls.map((item) => `${item.url} (${item.count})`).join(", ") || "None visible"}
 - Commands: ${session.commands.map((item) => `${item.command} (${item.count})`).join(", ") || "None visible"}
-- Evidence: ${session.evidenceIds.join(", ")}`
+- Evidence: ${formatEvidenceList(session.evidenceIds)}`
 )).join("\n\n")}`;
 }
 
