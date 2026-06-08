@@ -46,11 +46,14 @@ async function main(argv) {
       slides: flags.slides,
       openai: openaiEnabled,
       openaiModel,
-      reasoningEffort: flags.reasoningEffort ?? "high",
+      reasoningEffort: flags.reasoningEffort ?? "medium",
+      dedupe: !flags.noDedupe,
       deleteRawMedia: Boolean(flags.deleteRawMedia),
       onFrameProgress: (event) => {
         if (event.status === "cached") {
           console.log(`Frame ${event.number}/${event.total}: ${event.observation.id} from cache`);
+        } else if (event.status === "deduped") {
+          console.log(`Frame ${event.number}/${event.total}: deduped ${event.observation.id} from ${event.representativeObservation.id}`);
         } else if (event.status === "analysing") {
           console.log(`Frame ${event.number}/${event.total}: analysing ${event.observation.id}`);
         } else if (event.status === "analysed") {
@@ -242,7 +245,7 @@ function parseFlags(argv) {
     const [rawName, inlineValue] = arg.slice(2).split("=", 2);
     const name = rawName.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 
-    if (["openai", "noOpenai", "retainRawMedia", "deleteRawMedia", "approveExport", "ackRealCapture", "noOpenSettings", "noRequestAccess"].includes(name)) {
+    if (["openai", "noOpenai", "noDedupe", "retainRawMedia", "deleteRawMedia", "approveExport", "ackRealCapture", "noOpenSettings", "noRequestAccess"].includes(name)) {
       flags[name] = true;
       continue;
     }
@@ -309,10 +312,10 @@ function printHelp() {
   console.log(`Lucille 3
 
 Usage:
-  lucille analyse [--day YYYY-MM-DD] [--model MODEL] [--provider auto|ollama] [--limit N] [--offset N] [--slides 1-3,7,10-12] [--delete-raw-media] [--debug-output PATH] [--no-openai]
+  lucille analyse [--day YYYY-MM-DD] [--model MODEL] [--provider auto|ollama] [--limit N] [--offset N] [--slides 1-3,7,10-12] [--delete-raw-media] [--debug-output PATH] [--no-openai] [--no-dedupe]
   lucille debug-frame [--day YYYY-MM-DD] [--frame-id OBS_OR_EVIDENCE_ID] [--offset N] [--model MODEL] [--debug-output PATH]
   lucille analyse --openai [--openai-model MODEL]
-  lucille eval-models [--day YYYY-MM-DD] [--models MODEL[,MODEL...]] [--reasoning-effort high]
+  lucille eval-models [--day YYYY-MM-DD] [--models MODEL[,MODEL...]] [--reasoning-effort medium]
   lucille capture permission [--no-open-settings] [--no-request-access]
   lucille capture start|pause|resume|stop|once|status [--day YYYY-MM-DD] [--ack-real-capture]
   lucille report --day YYYY-MM-DD
@@ -321,7 +324,7 @@ Usage:
   lucille export --day YYYY-MM-DD [--proposal-id skill-id] [--approve-export]
   lucille ui [--day YYYY-MM-DD] [--port 4173]
 
-Frame analysis is local-first and model names come from .env unless explicit flags are passed. If OPENAI_API_KEY is present, analyse uses OpenAI synthesis by default for pattern review, recommendations, and skill proposal quality; pass --no-openai or OPENAI=0 in Make to use local-only synthesis. The analyse command requires real captured observations with day-scoped raw media and a local Ollama visual provider; mock fixture analysis is disabled. If captured observations, raw media, or Ollama are unavailable, analysis fails clearly. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
+Frame analysis is local-first and model names come from .env unless explicit flags are passed. Consecutive near-duplicate frames are deduped by default; pass --no-dedupe or DEDUPE=0 in Make to analyse every selected frame individually. If OPENAI_API_KEY is present, analyse uses OpenAI synthesis by default for pattern review, recommendations, and skill proposal quality; pass --no-openai or OPENAI=0 in Make to use local-only synthesis. The analyse command requires real captured observations with day-scoped raw media and a local Ollama visual provider; mock fixture analysis is disabled. If captured observations, raw media, or Ollama are unavailable, analysis fails clearly. Real capture requires LUCILLE_REAL_CAPTURE_ACK=1 or --ack-real-capture. Use lucille capture permission to request/check macOS Screen Recording access before operator smoke. Analysis retains day-scoped raw media by default and deletes it only when --delete-raw-media is set. Analysis stores no raw screenshots in structured artifacts, keystrokes, clipboard, audio, raw document bodies, or raw message bodies.`);
 }
 
 function today() {

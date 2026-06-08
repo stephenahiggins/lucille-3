@@ -261,6 +261,75 @@ test("runAnalysis resumes from cached real frame analysis without re-calling the
   assert.equal(memory.regularTasks[0].observedFrameCount, 3);
 });
 
+test("runAnalysis dedupes consecutive near-identical real frames by default", async (t) => {
+  if (!hasImageMagick()) {
+    t.skip("ImageMagick is required for perceptual frame dedupe.");
+    return;
+  }
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "lucille-dedupe-"));
+  const day = "2026-05-30";
+  const captureDir = path.join(root, "storage", "captures", day);
+  const rawMediaDir = path.join(captureDir, "raw-media");
+  mkdirSync(rawMediaDir, { recursive: true });
+  const observations = Array.from({ length: 3 }, (_, index) => ({
+    schemaVersion: "observation.v1",
+    id: `obs-dedupe-${String(index + 1).padStart(3, "0")}`,
+    capturedAt: `${day}T09:00:${String(index * 5).padStart(2, "0")}.000Z`,
+    appName: "Browser",
+    windowTitle: "Attendance report",
+    domain: "example.edu",
+    activity: "attendance review",
+    visibleTextSummary: "Review attendance report follow-up and reconciliation.",
+    redactedSignals: ["Attendance report needs manual reconciliation"],
+    evidenceIds: [`dedupe-evidence-${String(index + 1).padStart(3, "0")}`]
+  }));
+  writeFileSync(
+    path.join(captureDir, "observations.jsonl"),
+    observations.map((observation) => JSON.stringify(observation)).join("\n") + "\n"
+  );
+  for (const observation of observations) {
+    writeBlackPng(path.join(rawMediaDir, `${observation.id}.png`));
+  }
+
+  let providerCalls = 0;
+  const result = await runAnalysis({
+    root,
+    day,
+    model: "moondream:1.8b",
+    openai: false,
+    fetchImpl: async (url, options) => {
+      providerCalls += 1;
+      const observation = parseObservationFromOllamaPrompt(JSON.parse(options.body).prompt);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: JSON.stringify(buildLocalVisualTestResponse(observation))
+        })
+      };
+    }
+  });
+
+  assert.equal(result.frameCount, 3);
+  assert.equal(providerCalls, 1);
+  const frames = readFileSync(path.join(root, "storage", "analysis", day, "frame-analysis.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(frames[0].duplicateOf, undefined);
+  assert.equal(frames[1].duplicateOf, "obs-dedupe-001");
+  assert.equal(frames[1].representativeEvidenceId, "dedupe-evidence-001");
+  assert.equal(frames[1].frameId, "obs-dedupe-002");
+  assert.equal(frames[1].evidenceId, "dedupe-evidence-002");
+  assert.equal(frames[2].duplicateOf, "obs-dedupe-001");
+  assert.equal(frames[2].frameId, "obs-dedupe-003");
+
+  const reportResult = generateDailyReport({ root, day });
+  const report = readFileSync(path.join(root, reportResult.reportPath), "utf8");
+  assert.match(report, /Frames reused from near-duplicate representatives: 2/);
+});
+
 test("runAnalysis normalizes generic cached import metadata as a blank frame", async () => {
   const root = fixtureRoot();
   const day = "2026-05-30";
@@ -3711,7 +3780,7 @@ test("OpenAI analysis mode uses Responses API with redacted structured evidence"
   assert.equal(request.method, "POST");
   assert.equal(request.headers.Authorization, "Bearer test-key");
   assert.equal(request.body.model, "gpt-5.5");
-  assert.equal(request.body.reasoning.effort, "high");
+  assert.equal(request.body.reasoning.effort, "medium");
 
   const requestBody = JSON.stringify(request.body);
   assert.match(requestBody, /senior work-pattern reviewer/);
@@ -3972,10 +4041,16 @@ test("make analyse enables OpenAI synthesis by default when an API key is config
   const debugAnalysisTarget = makefile.match(/^debug-analysis:.*(?:\n\t.*)*/m)?.[0] ?? "";
 
   assert.match(makefile, /^OPENAI \?= auto/m);
-  assert.match(analyseTarget, /\[ "\$\(OPENAI\)" = "auto" \] && \[ -n "\$\(OPENAI_API_KEY\)" \]/);
+  assert.match(makefile, /^DEDUPE \?= 1/m);
+  assert.match(analyseTarget, /\[ "\$\(OPENAI\)" = "auto" \]/);
+  assert.doesNotMatch(analyseTarget, /OPENAI_API_KEY/);
   assert.match(analyseTarget, /--openai --reasoning-effort \$\(REASONING_EFFORT\)/);
+  assert.match(analyseTarget, /--reasoning-effort \$\(REASONING_EFFORT\)/);
   assert.match(analyseTarget, /--no-openai/);
-  assert.match(debugAnalysisTarget, /\[ "\$\(OPENAI\)" = "auto" \] && \[ -n "\$\(OPENAI_API_KEY\)" \]/);
+  assert.match(analyseTarget, /--no-dedupe/);
+  assert.match(debugAnalysisTarget, /\[ "\$\(OPENAI\)" = "auto" \]/);
+  assert.doesNotMatch(debugAnalysisTarget, /OPENAI_API_KEY/);
+  assert.match(debugAnalysisTarget, /--no-dedupe/);
 });
 
 test("make verify-mmp invokes the release readiness gate", () => {
@@ -5317,4 +5392,17 @@ function writeFakeMake(root) {
   writeFileSync(fakeMake, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> make-calls.log\n");
   chmodSync(fakeMake, 0o755);
   return fakeMake;
+}
+
+function hasImageMagick() {
+  try {
+    execFileSync("magick", ["-version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeBlackPng(filePath) {
+  execFileSync("magick", ["-size", "4x4", "xc:black", filePath]);
 }

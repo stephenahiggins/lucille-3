@@ -67,6 +67,7 @@ Defaults:
 - `OPENAI_MODEL`: from `LUCILLE_OPENAI_MODEL` in `.env`
 - `EVAL_MODELS`: from `LUCILLE_EVAL_MODELS` in `.env`
 - `REASONING_EFFORT`: `medium`
+- `DEDUPE`: `1`, meaning consecutive near-duplicate frames reuse the nearest representative analysis
 - `DELETE_RAW_MEDIA`: `0`
 - `APPROVE_EXPORT`: `0`
 
@@ -84,7 +85,7 @@ Persisted observations include only bounded structured metadata: observation id,
 
 Capture-once treats raw media and observations as a single accepted frame. If `screencapture` or an injected capture command fails after creating a partial image file, Lucille deletes that partial raw media and does not append an observation.
 
-`make analyse` defaults to `PROVIDER=auto`, reads the local visual model from `LUCILLE_LOCAL_MODEL` in `.env`, and uses OpenAI synthesis automatically when `OPENAI_API_KEY` is available. The OpenAI synthesis model comes from `LUCILLE_OPENAI_MODEL`, currently intended for the GPT-5.5-class model configured in `.env`. Per-frame visual analysis remains local through Ollama; OpenAI is used only for the interconnected pattern review, recommendations, and skill portfolio over redacted structured evidence. Set `OPENAI=0` or pass `--no-openai` to force local-only synthesis.
+`make analyse` defaults to `PROVIDER=auto`, reads the local visual model from `LUCILLE_LOCAL_MODEL` in `.env`, dedupes consecutive near-identical frames, and uses OpenAI synthesis automatically when `OPENAI_API_KEY` is available. The OpenAI synthesis model comes from `LUCILLE_OPENAI_MODEL`, currently intended for the GPT-5.5-class model configured in `.env`. Per-frame visual analysis remains local through Ollama; OpenAI is used only for the interconnected pattern review, recommendations, and skill portfolio over redacted structured evidence. Set `DEDUPE=0` or `LUCILLE_DEDUPE=0` to force every selected frame through local visual analysis. Set `OPENAI=0` or pass `--no-openai` to force local-only synthesis.
 
 Analysis requires real captured observations with day-scoped raw media and a local Ollama visual provider. If captured observations, raw media, or Ollama are unavailable, analysis fails clearly instead of using mock evidence. Explicit `PROVIDER=ollama` fails clearly if `storage/captures/<DAY>/raw-media/<OBSERVATION_ID>.<png|jpg|jpeg|webp>` is missing or Ollama is not reachable. Analysis writes:
 
@@ -148,7 +149,7 @@ Analysis also re-applies the excluded app and domain policy before provider sele
 
 The Ollama path calls only a local model service, defaulting to `http://127.0.0.1:11434/api/generate`. It sends local raw media for the matching observation id to that local endpoint and persists only normalized structured `frame-analysis.v1` output. The top-level frame `evidenceId` is the observation raw-frame evidence id, for example `obs-...-raw-frame`, so downstream reports and skill proposals cite screenshot-backed evidence from captured frames. Raw screenshots are not sent to OpenAI by default.
 
-Successful local visual frame analyses are cached under `storage/analysis/<DAY>/frame-cache/<MODEL>/<PROMPT_VERSION>/`. This cache contains only privacy-safe normalized `frame-analysis.v1` output produced from real captured frames by the real local model. It is used to resume long all-frame analyses without reprocessing frames that already succeeded; it is not a mock or fixture fallback.
+Successful local visual frame analyses are cached under `storage/analysis/<DAY>/frame-cache/<MODEL>/<PROMPT_VERSION>/`. This cache contains only privacy-safe normalized `frame-analysis.v1` output produced from real captured frames by the real local model. It is used to resume long all-frame analyses without reprocessing frames that already succeeded; it is not a mock or fixture fallback. When dedupe is enabled, consecutive near-duplicate frames reuse a representative real analysis while preserving each frame's own evidence id, timestamp, and `duplicateOf` metadata.
 
 Hosted synthesis is on by default when `OPENAI_API_KEY` is configured. It uses the OpenAI Responses API with `LUCILLE_OPENAI_MODEL`, sends local timeline/common-task summaries plus representative redacted frame evidence only, and is responsible for higher-quality pattern review, recommendations, and skill portfolio construction. Raw screenshots and raw media paths are not sent. The hosted response is normalized back into local `work-patterns.json` and `skill-proposals.json` with evidence IDs, confidence, and proposed-only export plans for Claude, Codex, Cursor, and ChatGPT. Use `OPENAI=0 make analyse ...` for a fully local synthesis run.
 

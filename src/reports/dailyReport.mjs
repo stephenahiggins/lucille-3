@@ -22,7 +22,9 @@ const frameFields = new Set([
   "keyTasks",
   "evidence",
   "redactions",
-  "riskFlags"
+  "riskFlags",
+  "duplicateOf",
+  "representativeEvidenceId"
 ]);
 const surfaceFields = new Set(["appName", "windowTitle", "domain"]);
 const applicationFields = new Set(["name", "windowTitle", "domain", "isPrimary", "primaryReason"]);
@@ -207,7 +209,9 @@ function validateFrame(value, { day, source }) {
       validateEvidence(item, `${source}.evidence[${index}]`)
     )),
     redactions: requireTextArray(value.redactions, `${source}.redactions`, 20, 120),
-    riskFlags: requireTextArray(value.riskFlags, `${source}.riskFlags`, 12, 120)
+    riskFlags: requireTextArray(value.riskFlags, `${source}.riskFlags`, 12, 120),
+    duplicateOf: value.duplicateOf === undefined ? null : requireText(value.duplicateOf, `${source}.duplicateOf`, 160),
+    representativeEvidenceId: value.representativeEvidenceId === undefined ? null : requireEvidenceId(value.representativeEvidenceId, `${source}.representativeEvidenceId`)
   };
 }
 
@@ -330,6 +334,7 @@ function validatePattern(value, source) {
 
 function renderReport({ day, frames, activityTimeline, sessionAnalysis, workPatterns, proposalSet, taskSkillSummary, memoryUpdate, optimizationWrapUp }) {
   const lifecycle = workPatterns.synthesis.rawMediaLifecycle;
+  const duplicateFrameCount = frames.filter((frame) => frame.duplicateOf).length;
   const totalWeeklyMinutes = workPatterns.patterns.reduce((sum, pattern) => sum + pattern.estimatedMinutesPerWeek, 0);
   const analysedSurfaces = renderAnalysedSurfaceSummary(frames);
   const patterns = workPatterns.patterns.map((pattern) => (
@@ -426,6 +431,7 @@ ${proposal.prerequisites.map((item) => `- ${item}`).join("\n")}`
 ## Summary
 
 - Frames analysed: ${frames.length}
+- Frames reused from near-duplicate representatives: ${duplicateFrameCount}
 - Sessions analysed: ${sessionAnalysis?.sessions?.length ?? activityTimeline.segments.length}
 - Provider: ${workPatterns.provider}
 - Model: ${workPatterns.model}

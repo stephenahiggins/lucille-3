@@ -15,6 +15,7 @@ OPENAI ?= auto
 OPENAI_MODEL ?= $(LUCILLE_OPENAI_MODEL)
 EVAL_MODELS ?= $(LUCILLE_EVAL_MODELS)
 REASONING_EFFORT ?= medium
+DEDUPE ?= 1
 DELETE_RAW_MEDIA ?= 0
 APPROVE_EXPORT ?= 0
 PROPOSAL ?=
@@ -29,7 +30,7 @@ CLI ?= dist/cli.js
 help:
 	@echo "Lucille commands"
 	@echo "  make capture        # capture visible frames every $(CAPTURE_INTERVAL)s; Ctrl-C to stop"
-	@echo "  make analyse DAY=$(DAY) MODEL=$(MODEL) PROVIDER=$(PROVIDER) ANALYSE_LIMIT=$(ANALYSE_LIMIT) OPENAI=$(OPENAI)"
+	@echo "  make analyse DAY=$(DAY) MODEL=$(MODEL) PROVIDER=$(PROVIDER) ANALYSE_LIMIT=$(ANALYSE_LIMIT) OPENAI=$(OPENAI) DEDUPE=$(DEDUPE)"
 	@echo "  make debug-analysis DAY=$(DAY) PROVIDER=$(PROVIDER) SLIDES=1-3,7,10-12 # analyse selected 1-based slide/frame groups"
 	@echo "  make debug-frame DAY=$(DAY) DEBUG_FRAME=<obs-or-evidence-id> # analyse one raw screenshot and print the prompt/output"
 	@echo "  make model-eval     # compare OpenAI models for weekly efficiency report quality"
@@ -104,8 +105,16 @@ analyse: build
 		if [ "$(DELETE_RAW_MEDIA)" = "1" ]; then \
 			ARGS="$$ARGS --delete-raw-media"; \
 		fi; \
-		if [ "$(OPENAI)" = "1" ] || { [ "$(OPENAI)" = "auto" ] && [ -n "$(OPENAI_API_KEY)" ]; }; then \
+		if [ "$(DEDUPE)" = "0" ]; then \
+			ARGS="$$ARGS --no-dedupe"; \
+		fi; \
+		if [ "$(OPENAI)" = "1" ]; then \
 			ARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \
+			if [ -n "$(OPENAI_MODEL)" ]; then \
+				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
+			fi; \
+		elif [ "$(OPENAI)" = "auto" ]; then \
+			ARGS="$$ARGS --reasoning-effort $(REASONING_EFFORT)"; \
 			if [ -n "$(OPENAI_MODEL)" ]; then \
 				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
 			fi; \
@@ -131,8 +140,16 @@ debug-analysis: build
 		if [ "$(DELETE_RAW_MEDIA)" = "1" ]; then \
 			ARGS="$$ARGS --delete-raw-media"; \
 		fi; \
-		if [ "$(OPENAI)" = "1" ] || { [ "$(OPENAI)" = "auto" ] && [ -n "$(OPENAI_API_KEY)" ]; }; then \
+		if [ "$(DEDUPE)" = "0" ]; then \
+			ARGS="$$ARGS --no-dedupe"; \
+		fi; \
+		if [ "$(OPENAI)" = "1" ]; then \
 			ARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \
+			if [ -n "$(OPENAI_MODEL)" ]; then \
+				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
+			fi; \
+		elif [ "$(OPENAI)" = "auto" ]; then \
+			ARGS="$$ARGS --reasoning-effort $(REASONING_EFFORT)"; \
 			if [ -n "$(OPENAI_MODEL)" ]; then \
 				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
 			fi; \

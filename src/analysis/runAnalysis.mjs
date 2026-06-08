@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import {
   analyseObservationWithOllama,
-  isLocalVisualProviderUnavailable
+  isLocalVisualProviderUnavailable,
+  resolveLocalRawMediaPath
 } from "./ollamaProvider.mjs";
 import { buildActivityTimeline } from "./activityTimeline.mjs";
 import { buildSessionAnalysis } from "./sessionAnalysis.mjs";
@@ -30,7 +32,8 @@ const defaultOptions = {
   slides: null,
   openai: false,
   openaiModel: null,
-  reasoningEffort: "high",
+  reasoningEffort: "medium",
+  dedupe: true,
   deleteRawMedia: false,
   env: process.env,
   fetchImpl: null,
@@ -98,6 +101,7 @@ export async function runAnalysis(options = {}) {
     day,
     model,
     provider,
+    dedupe: resolveDedupeFlag(config),
     fetchImpl: config.fetchImpl,
     env: config.env,
     ollamaEndpoint: config.ollamaEndpoint ?? config.env.OLLAMA_HOST,
@@ -337,6 +341,7 @@ async function buildFrameAnalysis({
   day,
   model,
   provider,
+  dedupe,
   fetchImpl,
   env,
   ollamaEndpoint,
@@ -344,6 +349,7 @@ async function buildFrameAnalysis({
 }) {
   try {
     const frameAnalysis = [];
+    let previousUnique = null;
     for (const [index, observation] of observations.entries()) {
       const cached = readCachedFrameAnalysis({ root, day, model, observation });
       if (cached) {
@@ -354,8 +360,35 @@ async function buildFrameAnalysis({
           status: "cached"
         });
         frameAnalysis.push(cached);
+        if (!cached.duplicateOf) {
+          previousUnique = {
+            observation,
+            frame: cached,
+            visualHash: dedupe ? computeObservationVisualHash({ root, day, observation }) : null
+          };
+        }
         continue;
       }
+
+      const visualHash = dedupe ? computeObservationVisualHash({ root, day, observation }) : null;
+      if (dedupe && previousUnique?.visualHash && visualHash && isNearDuplicateVisualHash(visualHash, previousUnique.visualHash)) {
+        const frame = cloneFrameAnalysisForDuplicate({
+          representativeFrame: previousUnique.frame,
+          representativeObservation: previousUnique.observation,
+          observation
+        });
+        writeCachedFrameAnalysis({ root, day, model, observation, frame });
+        reportFrameProgress(onFrameProgress, {
+          index,
+          total: observations.length,
+          observation,
+          status: "deduped",
+          representativeObservation: previousUnique.observation
+        });
+        frameAnalysis.push(frame);
+        continue;
+      }
+
       reportFrameProgress(onFrameProgress, {
         index,
         total: observations.length,
@@ -380,6 +413,11 @@ async function buildFrameAnalysis({
         status: "analysed"
       });
       frameAnalysis.push(frame);
+      previousUnique = {
+        observation,
+        frame,
+        visualHash
+      };
     }
 
     return {
@@ -402,11 +440,106 @@ async function buildFrameAnalysis({
   }
 }
 
+function resolveDedupeFlag(config) {
+  const explicit = config.dedupe;
+  if (explicit === false || explicit === "0" || explicit === "false") return false;
+  if (explicit === true || explicit === "1" || explicit === "true") return true;
+  const envValue = config.env?.LUCILLE_DEDUPE ?? config.env?.DEDUPE;
+  if (envValue === "0" || envValue === "false") return false;
+  return true;
+}
+
 function reportFrameProgress(onFrameProgress, event) {
   if (typeof onFrameProgress !== "function") return;
   onFrameProgress({
     ...event,
     number: event.index + 1
+  });
+}
+
+function computeObservationVisualHash({ root, day, observation }) {
+  let mediaPath = null;
+  try {
+    mediaPath = resolveLocalRawMediaPath({ root, day, observation });
+  } catch {
+    return null;
+  }
+
+  try {
+    const output = execFileSync("magick", [
+      mediaPath,
+      "-resize",
+      "9x8!",
+      "-colorspace",
+      "Gray",
+      "-depth",
+      "8",
+      "txt:-"
+    ], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    return differenceHashFromImageMagickText(output);
+  } catch {
+    return null;
+  }
+}
+
+function differenceHashFromImageMagickText(output) {
+  const values = [];
+  for (const line of String(output).split("\n")) {
+    const grayMatch = /gray\((\d+(?:\.\d+)?)\)/i.exec(line);
+    if (grayMatch) {
+      values.push(Math.round(Number(grayMatch[1])));
+      continue;
+    }
+    const hexMatch = /#([0-9A-Fa-f]{2})\1\1/.exec(line);
+    if (hexMatch) values.push(parseInt(hexMatch[1], 16));
+  }
+
+  if (values.length !== 72) return null;
+  let bits = "";
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      bits += values[y * 9 + x] > values[y * 9 + x + 1] ? "1" : "0";
+    }
+  }
+  return bits;
+}
+
+function isNearDuplicateVisualHash(left, right, threshold = 4) {
+  if (typeof left !== "string" || typeof right !== "string" || left.length !== right.length) return false;
+  let distance = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) distance += 1;
+    if (distance > threshold) return false;
+  }
+  return true;
+}
+
+function cloneFrameAnalysisForDuplicate({ representativeFrame, representativeObservation, observation }) {
+  const evidenceId = observation.evidenceIds[0] ?? `${observation.id}-raw-frame`;
+  const evidence = Array.isArray(representativeFrame.evidence)
+    ? representativeFrame.evidence.map((item, index) => ({
+      ...item,
+      id: observation.evidenceIds[index] ?? (index === 0 ? evidenceId : `${observation.id}-local-visual-${String(index + 1).padStart(2, "0")}`)
+    }))
+    : [];
+
+  return normalizeFrameWorkSummary({
+    ...representativeFrame,
+    evidenceId,
+    frameId: observation.id,
+    capturedAt: observation.capturedAt,
+    surface: {
+      appName: observation.appName,
+      windowTitle: observation.windowTitle,
+      domain: observation.domain ?? null
+    },
+    evidence,
+    duplicateOf: representativeObservation.id,
+    representativeEvidenceId: representativeFrame.evidenceId
   });
 }
 
