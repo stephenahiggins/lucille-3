@@ -41,6 +41,9 @@ export async function synthesizeWithOpenAI(options = {}) {
     evidencePackage
   });
   const evidenceIds = new Set(frames.map((frame) => frame.evidenceId));
+  const timelineCommonTasks = Array.isArray(options.activityTimeline?.commonTasks)
+    ? options.activityTimeline.commonTasks
+    : [];
   let feedback = null;
   let lastFailure = null;
 
@@ -65,12 +68,13 @@ export async function synthesizeWithOpenAI(options = {}) {
 
     if (!response?.ok) {
       const status = response?.status ?? "unknown";
-      throw new Error(`OpenAI Responses API request failed with status ${status}.`);
+      const detail = await readOpenAIErrorDetail(response);
+      throw new Error(`OpenAI Responses API request failed with status ${status}${detail ? `: ${detail}` : ""}.`);
     }
 
     const payload = await response.json();
     const parsed = parseResponseJson(extractOutputText(payload));
-    const normalized = normalizeOpenAISynthesis(parsed, { day, evidenceIds });
+    const normalized = normalizeOpenAISynthesis(parsed, { day, evidenceIds, timelineCommonTasks });
     assertPrivacySafe(normalized, "openaiSynthesis");
 
     const readiness = assessSkillPortfolioReadiness(normalized.proposals);
@@ -105,7 +109,10 @@ export async function synthesizeWithOpenAI(options = {}) {
 }
 
 export function buildEvidencePackage({ day, frames, activityTimeline = null, localPatterns = [] }) {
-  const redactedFrames = frames.map((frame) => ({
+  const synthesisFrames = activityTimeline
+    ? selectRepresentativeFrames(frames, activityTimeline)
+    : frames;
+  const redactedFrames = synthesisFrames.map((frame) => ({
     evidenceId: frame.evidenceId,
     day: frame.day,
     capturedAt: frame.capturedAt,
@@ -141,17 +148,30 @@ export function buildEvidencePackage({ day, frames, activityTimeline = null, loc
     day,
     privacy: {
       evidencePolicy: activityTimeline
-        ? "redacted_structured_timeline_and_frame_evidence_only"
+        ? "redacted_structured_timeline_and_representative_frame_evidence_only"
         : "redacted_structured_frame_evidence_only",
       rawScreenshotsIncluded: false,
       rawMediaPathsIncluded: false,
       redactions: privacyRedactions()
     },
+    frameSelection: activityTimeline
+      ? {
+        strategy: "timeline_representatives_only",
+        sourceFrameCount: frames.length,
+        includedFrameCount: redactedFrames.length,
+        note: "OpenAI receives local common-task and segment summaries plus representative redacted frame records; full per-frame analysis remains local."
+      }
+      : {
+        strategy: "all_frames_no_timeline_available",
+        sourceFrameCount: frames.length,
+        includedFrameCount: redactedFrames.length
+      },
     frames: redactedFrames,
     activityTimeline: activityTimeline
       ? {
         schemaVersion: activityTimeline.schemaVersion,
         textCapturePolicy: activityTimeline.textCapturePolicy,
+        scaleSummary: activityTimeline.scaleSummary,
         commonTasks: activityTimeline.commonTasks.map((task) => ({
           id: task.id,
           title: task.title,
@@ -201,76 +221,47 @@ export function buildEvidencePackage({ day, frames, activityTimeline = null, loc
   };
 }
 
+function selectRepresentativeFrames(frames, activityTimeline, limit = 64) {
+  const frameById = new Map(frames.map((frame) => [frame.evidenceId, frame]));
+  const selectedIds = [];
+  const seen = new Set();
+  const addId = (id) => {
+    if (typeof id !== "string" || seen.has(id) || !frameById.has(id)) return;
+    seen.add(id);
+    selectedIds.push(id);
+  };
+
+  for (const task of activityTimeline.commonTasks ?? []) {
+    for (const item of task.evidenceTrail ?? []) addId(item.evidenceId);
+  }
+  for (const segment of activityTimeline.segments ?? []) {
+    addId(segment.evidenceIds?.[0]);
+    addId(segment.evidenceIds?.[Math.floor((segment.evidenceIds?.length ?? 1) / 2)]);
+    addId(segment.evidenceIds?.[(segment.evidenceIds?.length ?? 1) - 1]);
+  }
+  for (const task of activityTimeline.commonTasks ?? []) {
+    addId(task.evidenceIds?.[0]);
+    addId(task.evidenceIds?.[Math.floor((task.evidenceIds?.length ?? 1) / 2)]);
+    addId(task.evidenceIds?.[(task.evidenceIds?.length ?? 1) - 1]);
+  }
+
+  return selectedIds.slice(0, limit).map((id) => frameById.get(id));
+}
+
 function buildResponsesRequest({ day, model, reasoningEffort, evidencePackage, feedback = null }) {
   return {
     model,
     reasoning: {
       effort: reasoningEffort
     },
-    instructions: [
-      "You synthesize Lucille 3 work-pattern evidence.",
-      "Return JSON only.",
-      "Use only the supplied redacted structured frame and activity timeline evidence.",
-      "Do not ask for or infer from screenshots, hidden monitoring, clipboard, audio, keystrokes, raw document bodies, or raw message bodies.",
-      "Prioritize activity timeline commonTasks for repeated tasks across the whole evidence set, then use segments for supporting context.",
-      "Analyze the evidence as Lucille, an AI-powered digital transformation consultant for weekly employee efficiency reports.",
-      "Generate a minimum marketable product skill portfolio that matches this release promise: employees receive weekly tailored AI efficiency reports, and managers can monitor AI transformation across the organisation.",
-      `The proposal set must include at least one proposal in every category: ${requiredProposalCategories.join(", ")}.`,
-      "Each proposal must be concrete enough to pilot: named owner, rollout metric, estimated weekly minutes saved, prerequisites, and three or more implementation steps.",
-      "Every pattern and proposal must cite evidence IDs and confidence."
-    ].join(" "),
+    instructions: buildSynthesisInstructions({ feedback }),
     input: [
       {
         role: "user",
         content: [
           {
             type: "input_text",
-            text: JSON.stringify({
-              task: "Identify repeated administrative work patterns and produce weekly efficiency recommendations for AI transformation.",
-              day,
-              releasePromise: {
-                employee: "Each employee receives a tailored weekly efficiency report explaining practical ways to use AI at work.",
-                organisation: "Leaders can monitor AI transformation opportunities, adoption, savings, and rollout readiness across the organisation.",
-                privacy: "Use redacted structured evidence only; do not rely on hidden monitoring or raw content."
-              },
-              feedback,
-              requiredOutputShape: {
-                patterns: [
-                  {
-                    id: "pattern-stable-slug",
-                    title: "Short pattern title",
-                    summary: "One sentence grounded in evidence.",
-                    repeatedAcrossEvidence: ["evidence-id"],
-                    confidence: 0.75,
-                    signals: ["short visible signal"],
-                    estimatedMinutesPerWeek: 45,
-                    recommendation: "Practical user-facing AI assistance recommendation that names the timeline-derived cognitive hurdle.",
-                    enterpriseSignal: "Manager-facing adoption or transformation tracking note."
-                  }
-                ],
-                proposals: [
-                  {
-                    id: "skill-stable-slug",
-                    title: "Short skill title",
-                    category: "employee_weekly_report",
-                    summary: "One sentence proposal.",
-                    implementationSteps: [
-                      "Concrete setup step",
-                      "Concrete user workflow step",
-                      "Concrete validation step"
-                    ],
-                    expectedOutcome: "Specific practical outcome for the employee or manager.",
-                    estimatedMinutesPerWeek: 45,
-                    owner: "Likely accountable role",
-                    rolloutMetric: "Specific metric the organisation can track.",
-                    prerequisites: ["Required template, access, export, or policy input"],
-                    evidenceIds: ["evidence-id"],
-                    confidence: 0.75
-                  }
-                ]
-              },
-              evidence: evidencePackage
-            })
+            text: JSON.stringify(buildSynthesisUserPayload({ day, feedback, evidencePackage }))
           }
         ]
       }
@@ -278,41 +269,139 @@ function buildResponsesRequest({ day, model, reasoningEffort, evidencePackage, f
   };
 }
 
-function normalizeOpenAISynthesis(value, { day, evidenceIds }) {
+function buildSynthesisInstructions({ feedback = null } = {}) {
+  return [
+    "You are Lucille's senior work-pattern reviewer and AI transformation consultant.",
+    "Return one valid JSON object only. Do not return Markdown, comments, prose outside JSON, or tool instructions.",
+    "Use only the supplied redacted structured frame, session, local-pattern, and activity timeline evidence.",
+    "Never ask for or infer from raw screenshots, hidden monitoring, clipboard contents, audio, keystrokes, raw document bodies, raw message bodies, passwords, cookies, or query-string URLs.",
+    "Your job is not to describe screenshots. Your job is to review interconnected frame evidence and decide which repeated workflows genuinely deserve recommendations.",
+    "Reason over the whole timeline: compare commonTasks, segments, frame counts, dwell time, surface switches, primary applications, visited URL patterns, commands, cognitive hurdles, and local pattern candidates.",
+    "If activityTimeline.commonTasks is supplied, every pattern repeatedAcrossEvidence must exactly equal one activityTimeline.commonTasks evidenceIds array; do not return narrower subsets for patterns.",
+    "If activityTimeline.commonTasks is supplied, every proposal evidenceIds array must use IDs from those commonTasks evidenceIds arrays.",
+    "Prefer specific repeated workflows over generic app names. A strong pattern should name the workflow, the friction, the likely user outcome, and the evidence trail.",
+    "Recommendations must be user-facing and pilotable. Avoid vague actions such as 'summarize evidence' or 'generate a report section' unless the action explains the concrete checklist, shortcut, automation, or skill the user will actually use.",
+    "When collaboration apps are visible, treat them as work context unless the evidence clearly shows non-work browsing. Do not label Slack or calendar usage as procrastination by default.",
+    "Generate a skill portfolio that fits Lucille's release promise: employees receive tailored weekly AI efficiency reports, and managers can monitor AI transformation opportunities without raw surveillance.",
+    `The proposal set must include at least one proposal in every required category: ${requiredProposalCategories.join(", ")}.`,
+    "Every proposal must be concrete enough to pilot: owner, rollout metric, expected outcome, prerequisites, estimated weekly minutes saved, at least three implementation steps, evidence IDs, and confidence.",
+    "Prefer 2-6 high-signal patterns and 5-10 balanced proposals. If evidence is thin, lower confidence rather than inventing facts.",
+    "Only cite evidence IDs that appear in the supplied evidence package.",
+    feedback ? `Previous attempt feedback to fix: ${feedback}` : "No previous attempt feedback."
+  ].join(" ");
+}
+
+function buildSynthesisUserPayload({ day, feedback, evidencePackage }) {
+  return {
+    task: "Review interconnected frame analysis and produce pattern-backed weekly efficiency recommendations plus a pilotable AI skill portfolio.",
+    day,
+    modelUse: {
+      defaultPurpose: "OpenAI synthesis is used for pattern review, recommendation quality, skill portfolio construction, and enterprise rollout framing.",
+      notUsedFor: "Raw image analysis, all-frame replay, keystroke logging, clipboard capture, audio capture, raw message extraction, or hidden monitoring."
+    },
+    reviewProtocol: [
+      "Start from activityTimeline.commonTasks and identify the strongest repeated workflows.",
+      "Map every returned pattern onto exactly one commonTasks evidence group so downstream reports can prove the recommendation from the same representative frame evidence.",
+      "Map every returned proposal onto one or more commonTasks evidence groups; do not cite isolated frame IDs that are absent from commonTasks evidenceIds.",
+      "Cross-check each candidate against sessionAnalysis-style signals present in segments: primary app, URLs, commands, dwell time, switches, and cognitive hurdles.",
+      "Use localPatterns as a baseline, but improve or reject them if the timeline evidence supports a better framing.",
+      "Write recommendations as practical user actions: checklist, saved workspace, browser shortcut pack, reviewed command runbook, drafting helper, QA workflow, automation queue, or skill.",
+      "Make manager/enterprise proposals measurable without exposing raw user content."
+    ],
+    releasePromise: {
+      employee: "Each employee receives a tailored weekly efficiency report explaining practical ways to use AI at work.",
+      organisation: "Leaders can monitor AI transformation opportunities, adoption, savings, and rollout readiness across the organisation.",
+      privacy: "Use redacted structured evidence only; do not rely on hidden monitoring or raw content."
+    },
+    commonTaskEvidenceContract: evidencePackage.activityTimeline
+      ? {
+        patternEvidenceRule: "Each pattern.repeatedAcrossEvidence must exactly match one activityTimeline.commonTasks[*].evidenceIds array.",
+        proposalEvidenceRule: "Each proposal.evidenceIds array must contain only IDs present in activityTimeline.commonTasks[*].evidenceIds.",
+        reason: "Lucille's MMP report, task-skill summaries, and readiness verifier share commonTasks as the canonical recommendation evidence contract."
+      }
+      : null,
+    feedback,
+    requiredOutputShape: {
+      patterns: [
+        {
+          id: "pattern-stable-slug",
+          title: "Short workflow pattern title",
+          summary: "One evidence-grounded sentence naming the repeated workflow, friction, and outcome.",
+          repeatedAcrossEvidence: ["evidence-id"],
+          confidence: 0.75,
+          signals: ["short visible signal"],
+          estimatedMinutesPerWeek: 45,
+          recommendation: "Specific user-facing action that can be piloted next week.",
+          enterpriseSignal: "Manager-facing adoption, savings, rollout, or governance tracking note."
+        }
+      ],
+      proposals: [
+        {
+          id: "skill-stable-slug",
+          title: "Short skill title",
+          category: "employee_weekly_report",
+          summary: "One sentence proposal grounded in repeated-work evidence.",
+          implementationSteps: [
+            "Concrete setup step",
+            "Concrete user workflow step",
+            "Concrete validation step"
+          ],
+          expectedOutcome: "Specific practical outcome for the employee or manager.",
+          estimatedMinutesPerWeek: 45,
+          owner: "Likely accountable role",
+          rolloutMetric: "Specific metric the organisation can track.",
+          prerequisites: ["Required template, access, export, or policy input"],
+          evidenceIds: ["evidence-id"],
+          confidence: 0.75
+        }
+      ]
+    },
+    evidence: evidencePackage
+  };
+}
+
+function normalizeOpenAISynthesis(value, { day, evidenceIds, timelineCommonTasks = [] }) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("OpenAI synthesis response must be a JSON object.");
   }
 
   const patterns = requireArray(value.patterns, "OpenAI synthesis patterns")
-    .map((pattern, index) => normalizePattern(pattern, { day, evidenceIds, index }));
+    .map((pattern, index) => normalizePattern(pattern, { day, evidenceIds, timelineCommonTasks, index }));
   const proposals = requireArray(value.proposals, "OpenAI synthesis proposals")
-    .map((proposal, index) => normalizeProposal(proposal, { day, evidenceIds, index }));
+    .map((proposal, index) => normalizeProposal(proposal, { day, evidenceIds, timelineCommonTasks, index }));
+  const dedupedPatterns = dedupePatternsByEvidence(patterns);
 
-  if (patterns.length === 0) {
+  if (dedupedPatterns.length === 0) {
     throw new Error("OpenAI synthesis response must include at least one pattern.");
   }
   if (proposals.length === 0) {
     throw new Error("OpenAI synthesis response must include at least one skill proposal.");
   }
 
-  return { patterns, proposals };
+  return { patterns: dedupedPatterns, proposals };
 }
 
-function normalizePattern(pattern, { day, evidenceIds, index }) {
+function normalizePattern(pattern, { day, evidenceIds, timelineCommonTasks, index }) {
   const id = optionalId(pattern.id, `pattern-openai-${day}-${index + 1}`);
-  const repeatedAcrossEvidence = requireEvidenceIds(pattern.repeatedAcrossEvidence, evidenceIds, `${id}.repeatedAcrossEvidence`);
+  const rawEvidence = requireEvidenceIds(pattern.repeatedAcrossEvidence, evidenceIds, `${id}.repeatedAcrossEvidence`);
+  const matchedTask = matchCommonTask(pattern, rawEvidence, timelineCommonTasks);
+  const repeatedAcrossEvidence = matchedTask?.evidenceIds ?? rawEvidence;
 
   return {
     id,
     title: requireText(pattern.title, `${id}.title`, 120),
     summary: requireText(pattern.summary, `${id}.summary`, 500),
     repeatedAcrossEvidence,
-    evidenceCount: Number.isInteger(pattern.evidenceCount) && pattern.evidenceCount > 0
-      ? pattern.evidenceCount
-      : repeatedAcrossEvidence.length,
-    segmentCount: Number.isInteger(pattern.segmentCount) && pattern.segmentCount > 0
-      ? pattern.segmentCount
-      : 1,
+    evidenceCount: matchedTask?.frameCount ?? (
+      Number.isInteger(pattern.evidenceCount) && pattern.evidenceCount > 0
+        ? pattern.evidenceCount
+        : repeatedAcrossEvidence.length
+    ),
+    segmentCount: matchedTask?.segmentCount ?? (
+      Number.isInteger(pattern.segmentCount) && pattern.segmentCount > 0
+        ? pattern.segmentCount
+        : 1
+    ),
     confidence: normalizeConfidence(pattern.confidence, `${id}.confidence`),
     signals: optionalTextArray(pattern.signals, `${id}.signals`, 8),
     estimatedMinutesPerWeek: optionalPositiveInteger(pattern.estimatedMinutesPerWeek, `${id}.estimatedMinutesPerWeek`, 45),
@@ -330,9 +419,11 @@ function normalizePattern(pattern, { day, evidenceIds, index }) {
   };
 }
 
-function normalizeProposal(proposal, { day, evidenceIds, index }) {
+function normalizeProposal(proposal, { day, evidenceIds, timelineCommonTasks, index }) {
   const id = optionalId(proposal.id, `skill-openai-${day}-${index + 1}`);
-  const proposalEvidenceIds = requireEvidenceIds(proposal.evidenceIds, evidenceIds, `${id}.evidenceIds`);
+  const rawEvidence = requireEvidenceIds(proposal.evidenceIds, evidenceIds, `${id}.evidenceIds`);
+  const matchedTask = matchCommonTask(proposal, rawEvidence, timelineCommonTasks);
+  const proposalEvidenceIds = matchedTask?.evidenceIds ?? rawEvidence;
 
   return {
     id,
@@ -368,6 +459,78 @@ function normalizeProposal(proposal, { day, evidenceIds, index }) {
       chatgpt: "instructions/knowledge/actions bundle not written until approved"
     }
   };
+}
+
+function matchCommonTask(source, evidenceIds, timelineCommonTasks) {
+  if (!Array.isArray(timelineCommonTasks) || timelineCommonTasks.length === 0) return null;
+  const candidates = timelineCommonTasks
+    .filter((task) => Array.isArray(task.evidenceIds) && task.evidenceIds.length > 0);
+  if (candidates.length === 0) return null;
+
+  const preferred = candidates.filter((task) => (task.frameCount ?? task.evidenceIds.length) > 1 || (task.segmentCount ?? 1) > 1);
+  const pool = preferred.length > 0 ? preferred : candidates;
+  const sourceText = [
+    source?.title,
+    source?.summary,
+    source?.recommendation,
+    source?.expectedOutcome,
+    source?.category,
+    ...(Array.isArray(source?.signals) ? source.signals : [])
+  ].filter(Boolean).join(" ").toLowerCase();
+  const evidenceSet = new Set(evidenceIds);
+
+  let best = null;
+  for (const task of pool) {
+    const overlap = task.evidenceIds.filter((id) => evidenceSet.has(id)).length;
+    const textScore = commonTaskTextScore(sourceText, task);
+    const frameScore = Math.min(5, Math.round((task.frameCount ?? task.evidenceIds.length) / 20));
+    const score = overlap * 100 + textScore * 10 + frameScore;
+    if (!best || score > best.score) {
+      best = { task, score, overlap, textScore };
+    }
+  }
+
+  if (best && (best.overlap > 0 || best.textScore > 0)) return best.task;
+  return pool[0];
+}
+
+function commonTaskTextScore(sourceText, task) {
+  const taskText = [
+    task.title,
+    task.userIntent,
+    task.evidenceNarrative,
+    ...(Array.isArray(task.commonActions) ? task.commonActions : []),
+    ...(Array.isArray(task.cognitiveHurdles) ? task.cognitiveHurdles : []),
+    ...(Array.isArray(task.recommendationSeeds) ? task.recommendationSeeds : [])
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  let score = 0;
+  const termGroups = [
+    ["attendance", "absence", "student", "pupil", "report", "dashboard", "qa"],
+    ["github", "pull request", "pr", "merge", "code", "terminal", "test", "command"],
+    ["slack", "teams", "discord", "message", "collaboration", "meeting"],
+    ["browser", "url", "web", "documentation", "research"]
+  ];
+
+  for (const terms of termGroups) {
+    const sourceHits = terms.filter((term) => sourceText.includes(term));
+    if (sourceHits.length === 0) continue;
+    score += sourceHits.filter((term) => taskText.includes(term)).length;
+  }
+
+  return score;
+}
+
+function dedupePatternsByEvidence(patterns) {
+  const byEvidence = new Map();
+  for (const pattern of patterns) {
+    const key = pattern.repeatedAcrossEvidence.join("\u0000");
+    const existing = byEvidence.get(key);
+    if (!existing || pattern.confidence > existing.confidence) {
+      byEvidence.set(key, pattern);
+    }
+  }
+  return [...byEvidence.values()];
 }
 
 function normalizeCategory(value, index) {
@@ -431,6 +594,31 @@ function parseResponseJson(text) {
   } catch (error) {
     throw new Error(`OpenAI synthesis response was not valid JSON: ${error.message}`);
   }
+}
+
+async function readOpenAIErrorDetail(response) {
+  if (!response || typeof response.text !== "function") return "";
+  try {
+    const text = await response.text();
+    if (!text) return "";
+    const parsed = JSON.parse(text);
+    const error = parsed?.error;
+    if (error && typeof error === "object") {
+      const parts = [
+        typeof error.code === "string" ? error.code : null,
+        typeof error.type === "string" ? error.type : null,
+        typeof error.message === "string" ? error.message : null
+      ].filter(Boolean);
+      return truncateErrorDetail(parts.join(" - "));
+    }
+    return truncateErrorDetail(text);
+  } catch {
+    return "";
+  }
+}
+
+function truncateErrorDetail(value) {
+  return String(value).replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
 function normalizeReasoningEffort(value) {

@@ -11,6 +11,7 @@ import { analyseObservationWithOllama } from "../src/analysis/ollamaProvider.mjs
 import { buildSessionAnalysis } from "../src/analysis/sessionAnalysis.mjs";
 import { debugFrameAnalysis } from "../src/analysis/debugFrame.mjs";
 import { evaluateOpenAIModels } from "../src/analysis/modelEvaluation.mjs";
+import { buildEvidencePackage } from "../src/analysis/openaiSynthesis.mjs";
 import { normalizeFrameWorkSummary } from "../src/analysis/frameWorkSummary.mjs";
 import { runAnalysis } from "../src/analysis/runAnalysis.mjs";
 import { handleCaptureAction, readCaptureState } from "../src/capture/controller.mjs";
@@ -759,6 +760,38 @@ test("activity timeline caps representative evidence while preserving full frame
   assert.equal(timeline.commonTasks[0].evidenceIds.length, 50);
   assert.equal(timeline.commonTasks[0].evidenceTrail.length, 20);
   assert.match(timeline.commonTasks[0].evidenceNarrative, /20 frame\(s\).*64 screenshot-backed evidence item\(s\)/);
+});
+
+test("OpenAI synthesis evidence summarizes large timelines instead of sending every frame", () => {
+  const frames = Array.from({ length: 96 }, (_, index) => syntheticFrame({
+    id: `synthesis-frame-${String(index + 1).padStart(3, "0")}`,
+    capturedAt: `2026-05-30T09:${String(Math.floor(index / 4)).padStart(2, "0")}:${String((index % 4) * 10).padStart(2, "0")}.000Z`,
+    appName: "Browser",
+    windowTitle: "Attendance report",
+    visibleIntent: "Review attendance report follow-up and reconciliation.",
+    activities: ["attendance review"],
+    evidence: ["Attendance report needs manual reconciliation"],
+    keyTasks: [
+      "Review attendance report evidence",
+      "Reconcile visible evidence and quality checks"
+    ]
+  }));
+  const timeline = buildActivityTimeline({ day: "2026-05-30", frames });
+  const evidence = buildEvidencePackage({
+    day: "2026-05-30",
+    frames,
+    activityTimeline: timeline,
+    localPatterns: []
+  });
+
+  assert.equal(evidence.frameSelection.strategy, "timeline_representatives_only");
+  assert.equal(evidence.frameSelection.sourceFrameCount, 96);
+  assert.ok(evidence.frameSelection.includedFrameCount < 96);
+  assert.ok(evidence.frameSelection.includedFrameCount <= 64);
+  assert.equal(evidence.activityTimeline.scaleSummary.frameCount, 96);
+  assert.equal(evidence.activityTimeline.commonTasks[0].frameCount, 96);
+  assert.equal(evidence.privacy.rawScreenshotsIncluded, false);
+  assert.match(evidence.privacy.evidencePolicy, /representative_frame/);
 });
 
 test("activity timeline caps representative segment IDs while preserving full segment counts", () => {
@@ -3475,6 +3508,47 @@ test("OpenAI analysis mode requires an API key", async () => {
   );
 });
 
+test("OpenAI analysis mode reports quota errors clearly", async () => {
+  const root = fixtureRoot();
+
+  await assert.rejects(
+    runAnalysis({
+      root,
+      day: "2026-05-30",
+      model: "moondream:1.8b",
+      openai: true,
+      openaiModel: "gpt-5.5",
+      env: { OPENAI_API_KEY: "test-key" },
+      fetchImpl: async (url, options) => {
+        if (String(url).includes("/api/generate")) {
+          const body = JSON.parse(options.body);
+          const observation = parseObservationFromOllamaPrompt(body.prompt);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              response: JSON.stringify(buildLocalVisualTestResponse(observation))
+            })
+          };
+        }
+
+        return {
+          ok: false,
+          status: 429,
+          text: async () => JSON.stringify({
+            error: {
+              code: "insufficient_quota",
+              type: "insufficient_quota",
+              message: "You exceeded your current quota, please check your plan and billing details."
+            }
+          })
+        };
+      }
+    }),
+    /429: insufficient_quota - insufficient_quota - You exceeded your current quota/
+  );
+});
+
 test("OpenAI analysis mode uses Responses API with redacted structured evidence", async () => {
   const root = fixtureRoot();
   let request = null;
@@ -3640,7 +3714,14 @@ test("OpenAI analysis mode uses Responses API with redacted structured evidence"
   assert.equal(request.body.reasoning.effort, "high");
 
   const requestBody = JSON.stringify(request.body);
-  assert.match(requestBody, /redacted_structured_timeline_and_frame_evidence_only/);
+  assert.match(requestBody, /senior work-pattern reviewer/);
+  assert.match(requestBody, /reviewProtocol/);
+  assert.match(requestBody, /commonTaskEvidenceContract/);
+  assert.match(requestBody, /must exactly match one activityTimeline\.commonTasks/);
+  assert.match(requestBody, /Recommendations must be user-facing/);
+  assert.match(requestBody, /pattern review, recommendation quality, skill portfolio construction/);
+  assert.match(requestBody, /redacted_structured_timeline_and_representative_frame_evidence_only/);
+  assert.match(requestBody, /timeline_representatives_only/);
   assert.match(requestBody, /activityTimeline/);
   assert.match(requestBody, /dwellTimeSeconds/);
   assert.doesNotMatch(requestBody, /screenshotPath/);
@@ -3658,9 +3739,15 @@ test("OpenAI analysis mode uses Responses API with redacted structured evidence"
   assert.equal(patterns.synthesis.rawScreenshotsSent, false);
   assert.equal(patterns.synthesis.openai.responseId, "resp_test_123");
   assert.equal(patterns.patterns[0].id, "pattern-openai-review-loop");
+  assert.equal(patterns.patterns[0].repeatedAcrossEvidence.length, 3);
   assert.equal(proposals.proposals[0].id, "skill-openai-review-loop");
   assert.equal(proposals.proposals[0].status, "proposed");
   assert.deepEqual(proposals.proposals[0].targetTools, ["Claude", "Codex", "Cursor", "ChatGPT"]);
+  assert.ok(proposals.proposals.some((proposal) => proposal.id === "skill-ai-transformation-manager-dashboard"));
+  assert.ok(proposals.proposals.some((proposal) => proposal.id === "skill-enterprise-ai-rollout-readiness"));
+  assert.ok(proposals.proposals.every((proposal) => proposal.evidenceIds.every((id) => (
+    ["fixture-evidence-001", "fixture-evidence-002", "fixture-evidence-003"].includes(id)
+  ))));
   assert.doesNotThrow(() => assertPrivacySafe(patterns, "patterns"));
   assert.doesNotThrow(() => assertPrivacySafe(proposals, "proposals"));
 });
@@ -3877,6 +3964,18 @@ test("make report invokes dedicated report generation", () => {
 
   assert.match(reportTarget, /\$\(NODE\) "\$\(CLI\)" report --day "\$\(DAY\)"/);
   assert.doesNotMatch(reportTarget, /review --day/);
+});
+
+test("make analyse enables OpenAI synthesis by default when an API key is configured", () => {
+  const makefile = readFileSync(path.join(process.cwd(), "Makefile"), "utf8");
+  const analyseTarget = makefile.match(/^analyse:.*(?:\n\t.*)*/m)?.[0] ?? "";
+  const debugAnalysisTarget = makefile.match(/^debug-analysis:.*(?:\n\t.*)*/m)?.[0] ?? "";
+
+  assert.match(makefile, /^OPENAI \?= auto/m);
+  assert.match(analyseTarget, /\[ "\$\(OPENAI\)" = "auto" \] && \[ -n "\$\(OPENAI_API_KEY\)" \]/);
+  assert.match(analyseTarget, /--openai --reasoning-effort \$\(REASONING_EFFORT\)/);
+  assert.match(analyseTarget, /--no-openai/);
+  assert.match(debugAnalysisTarget, /\[ "\$\(OPENAI\)" = "auto" \] && \[ -n "\$\(OPENAI_API_KEY\)" \]/);
 });
 
 test("make verify-mmp invokes the release readiness gate", () => {

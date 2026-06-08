@@ -979,10 +979,13 @@ function truncateText(text, maxLength) {
 }
 
 function buildSkillProposals(workPatterns, day, openaiProposals = null) {
-  const proposals = openaiProposals ?? [
+  const localProposals = [
     ...workPatterns.patterns.flatMap((pattern) => buildLocalSkillProposals(pattern)),
     ...buildPortfolioSkillProposals(workPatterns.patterns)
   ];
+  const proposals = openaiProposals
+    ? [...openaiProposals, ...localProposals]
+    : localProposals;
   return {
     schemaVersion: "skill-proposals.v1",
     day,
