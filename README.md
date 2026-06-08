@@ -63,9 +63,10 @@ Defaults:
 - `PROVIDER`: `auto`
 - `ANALYSE_LIMIT`: unset, meaning all observations
 - `ANALYSE_OFFSET`: `0`
+- `OPENAI`: `auto`, meaning hosted synthesis is used when `OPENAI_API_KEY` is available
 - `OPENAI_MODEL`: from `LUCILLE_OPENAI_MODEL` in `.env`
 - `EVAL_MODELS`: from `LUCILLE_EVAL_MODELS` in `.env`
-- `REASONING_EFFORT`: `high`
+- `REASONING_EFFORT`: `medium`
 - `DELETE_RAW_MEDIA`: `0`
 - `APPROVE_EXPORT`: `0`
 
@@ -83,7 +84,9 @@ Persisted observations include only bounded structured metadata: observation id,
 
 Capture-once treats raw media and observations as a single accepted frame. If `screencapture` or an injected capture command fails after creating a partial image file, Lucille deletes that partial raw media and does not append an observation.
 
-`make analyse` defaults to `PROVIDER=auto` and reads the local model from `LUCILLE_LOCAL_MODEL` in `.env`. Analysis requires real captured observations with day-scoped raw media and a local Ollama visual provider. If captured observations, raw media, or Ollama are unavailable, analysis fails clearly instead of using mock evidence. Explicit `PROVIDER=ollama` fails clearly if `storage/captures/<DAY>/raw-media/<OBSERVATION_ID>.<png|jpg|jpeg|webp>` is missing or Ollama is not reachable. Analysis writes:
+`make analyse` defaults to `PROVIDER=auto`, reads the local visual model from `LUCILLE_LOCAL_MODEL` in `.env`, and uses OpenAI synthesis automatically when `OPENAI_API_KEY` is available. The OpenAI synthesis model comes from `LUCILLE_OPENAI_MODEL`, currently intended for the GPT-5.5-class model configured in `.env`. Per-frame visual analysis remains local through Ollama; OpenAI is used only for the interconnected pattern review, recommendations, and skill portfolio over redacted structured evidence. Set `OPENAI=0` or pass `--no-openai` to force local-only synthesis.
+
+Analysis requires real captured observations with day-scoped raw media and a local Ollama visual provider. If captured observations, raw media, or Ollama are unavailable, analysis fails clearly instead of using mock evidence. Explicit `PROVIDER=ollama` fails clearly if `storage/captures/<DAY>/raw-media/<OBSERVATION_ID>.<png|jpg|jpeg|webp>` is missing or Ollama is not reachable. Analysis writes:
 
 For local vision testing, analyse a small chunk first:
 
@@ -147,7 +150,7 @@ The Ollama path calls only a local model service, defaulting to `http://127.0.0.
 
 Successful local visual frame analyses are cached under `storage/analysis/<DAY>/frame-cache/<MODEL>/<PROMPT_VERSION>/`. This cache contains only privacy-safe normalized `frame-analysis.v1` output produced from real captured frames by the real local model. It is used to resume long all-frame analyses without reprocessing frames that already succeeded; it is not a mock or fixture fallback.
 
-`OPENAI=1` enables the optional hosted synthesis slice. It requires `OPENAI_API_KEY`, uses the OpenAI Responses API, and sends redacted structured frame/storyboard evidence only. Raw screenshots and raw media paths are not sent by default. The hosted response is normalized back into local `work-patterns.json` and `skill-proposals.json` with evidence IDs, confidence, and proposed-only export plans for Claude, Codex, Cursor, and ChatGPT.
+Hosted synthesis is on by default when `OPENAI_API_KEY` is configured. It uses the OpenAI Responses API with `LUCILLE_OPENAI_MODEL`, sends local timeline/common-task summaries plus representative redacted frame evidence only, and is responsible for higher-quality pattern review, recommendations, and skill portfolio construction. Raw screenshots and raw media paths are not sent. The hosted response is normalized back into local `work-patterns.json` and `skill-proposals.json` with evidence IDs, confidence, and proposed-only export plans for Claude, Codex, Cursor, and ChatGPT. Use `OPENAI=0 make analyse ...` for a fully local synthesis run.
 
 By default, analysis keeps source images under `storage/captures/<DAY>/raw-media/` so operators can inspect or rerun model analysis. Set `DELETE_RAW_MEDIA=1` or pass `--delete-raw-media` only when you explicitly want analysis to delete day-scoped image files after structured analysis.
 

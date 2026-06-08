@@ -11,10 +11,10 @@ SLIDES ?=
 DEBUG_DIR ?= debug
 DEBUG_FRAME ?=
 DEBUG_OFFSET ?= 0
-OPENAI ?= 0
+OPENAI ?= auto
 OPENAI_MODEL ?= $(LUCILLE_OPENAI_MODEL)
 EVAL_MODELS ?= $(LUCILLE_EVAL_MODELS)
-REASONING_EFFORT ?= high
+REASONING_EFFORT ?= medium
 DELETE_RAW_MEDIA ?= 0
 APPROVE_EXPORT ?= 0
 PROPOSAL ?=
@@ -104,11 +104,13 @@ analyse: build
 		if [ "$(DELETE_RAW_MEDIA)" = "1" ]; then \
 			ARGS="$$ARGS --delete-raw-media"; \
 		fi; \
-		if [ "$(OPENAI)" = "1" ]; then \
+		if [ "$(OPENAI)" = "1" ] || { [ "$(OPENAI)" = "auto" ] && [ -n "$(OPENAI_API_KEY)" ]; }; then \
 			ARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \
 			if [ -n "$(OPENAI_MODEL)" ]; then \
 				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
 			fi; \
+		elif [ "$(OPENAI)" = "0" ]; then \
+			ARGS="$$ARGS --no-openai"; \
 		fi; \
 		echo "$(NODE) $(CLI) $$ARGS"; \
 		$(NODE) "$(CLI)" $$ARGS; \
@@ -129,11 +131,13 @@ debug-analysis: build
 		if [ "$(DELETE_RAW_MEDIA)" = "1" ]; then \
 			ARGS="$$ARGS --delete-raw-media"; \
 		fi; \
-		if [ "$(OPENAI)" = "1" ]; then \
+		if [ "$(OPENAI)" = "1" ] || { [ "$(OPENAI)" = "auto" ] && [ -n "$(OPENAI_API_KEY)" ]; }; then \
 			ARGS="$$ARGS --openai --reasoning-effort $(REASONING_EFFORT)"; \
 			if [ -n "$(OPENAI_MODEL)" ]; then \
 				ARGS="$$ARGS --openai-model $(OPENAI_MODEL)"; \
 			fi; \
+		elif [ "$(OPENAI)" = "0" ]; then \
+			ARGS="$$ARGS --no-openai"; \
 		fi; \
 		echo "$(NODE) $(CLI) $$ARGS"; \
 		$(NODE) "$(CLI)" $$ARGS; \
