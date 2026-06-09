@@ -4061,6 +4061,16 @@ test("make verify-mmp invokes the release readiness gate", () => {
   assert.match(verifyTarget, /DAY="\$\(DAY\)" \$\(NPM\) run verify:mmp/);
 });
 
+test("make ui watches source changes by default", () => {
+  const makefile = readFileSync(path.join(process.cwd(), "Makefile"), "utf8");
+  const uiTarget = makefile.match(/^ui:.*(?:\n\t.*)*/m)?.[0] ?? "";
+
+  assert.match(makefile, /^UI_WATCH \?= 1/m);
+  assert.match(uiTarget, /\[ "\$\(UI_WATCH\)" = "1" \]/);
+  assert.match(uiTarget, /\$\(NODE\) --watch "\$\(CLI\)" ui --day "\$\(DAY\)" --port "\$\(UI_PORT\)"/);
+  assert.match(uiTarget, /\$\(NODE\) "\$\(CLI\)" ui --day "\$\(DAY\)" --port "\$\(UI_PORT\)"/);
+});
+
 test("debug make targets write latest JSON to an ignored debug directory", () => {
   const makefile = readFileSync(path.join(process.cwd(), "Makefile"), "utf8");
   const gitignore = readFileSync(path.join(process.cwd(), ".gitignore"), "utf8");
@@ -4185,9 +4195,16 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     assert.match(pageHtml, /Medium \(0\.60-0\.79\)/);
     assert.match(pageHtml, /Low \(&lt;0\.60\)/);
     assert.match(pageHtml, /<input id="search"/);
+    assert.match(pageHtml, /<button id="preview-skills" disabled>Preview skill files<\/button>/);
+    assert.ok(pageHtml.indexOf('id="preview-skills"') < pageHtml.indexOf('id="generate"'));
     assert.match(pageHtml, /Common Tasks/);
     assert.match(pageHtml, /<aside class="proposal-sidebar">/);
     assert.match(pageHtml, /<h1>Proposals<\/h1>/);
+    assert.match(pageHtml, /Preview skill files/);
+    assert.match(pageHtml, /id="preview-panel"/);
+    assert.match(pageHtml, /id="preview-file"/);
+    assert.match(pageHtml, /api\/preview/);
+    assert.match(pageHtml, /api\/reload-version/);
     assert.match(pageHtml, /id="common-tasks"/);
     assert.match(pageHtml, /task-evidence/);
     assert.match(pageHtml, /frame-preview/);
@@ -4200,6 +4217,12 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     assert.equal(daysResponse.status, 200);
     const days = await daysResponse.json();
     assert.deepEqual(days.days, ["2026-05-30"]);
+
+    const reloadVersionResponse = await fetch(`${baseUrl}/api/reload-version`);
+    assert.equal(reloadVersionResponse.status, 200);
+    const reloadVersion = await reloadVersionResponse.json();
+    assert.equal(reloadVersion.schemaVersion, "ui-reload-version.v1");
+    assert.match(reloadVersion.version, /^\d+$/);
 
     const loadedResponse = await fetch(`${baseUrl}/api/proposals?day=2026-05-30`);
     assert.equal(loadedResponse.status, 200);
@@ -4244,6 +4267,34 @@ test("skill web UI API edits generates and downloads skill proposals", async () 
     assert.ok(refreshedTaskSummary.commonTasks[0].skills.some((skill) => (
       skill.title === "Edited Attendance Report Review Assistant"
     )));
+
+    const expectedPreviewFile = path.join(
+      "output",
+      "skills",
+      "2026-05-30",
+      saved.proposals[0].id,
+      "codex",
+      "SKILL.md"
+    );
+    const previewResponse = await fetch(`${baseUrl}/api/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        day: "2026-05-30",
+        proposalId: saved.proposals[0].id,
+        proposalSet: saved.proposalSet
+      })
+    });
+    assert.equal(previewResponse.status, 200);
+    const preview = await previewResponse.json();
+    assert.equal(preview.schemaVersion, "skill-preview-bundle.v1");
+    assert.equal(preview.files.length, 6);
+    assert.equal(preview.repeatedTaskContexts.length, 1);
+    assert.match(
+      preview.files.find((file) => file.path === expectedPreviewFile).content,
+      /Edited Attendance Report Review Assistant/
+    );
+    assert.equal(existsSync(path.join(root, expectedPreviewFile)), false);
 
     const generateResponse = await fetch(`${baseUrl}/api/generate`, {
       method: "POST",

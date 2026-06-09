@@ -15,19 +15,27 @@ const defaultPort = 4173;
 export function createSkillUiServer(options = {}) {
   const root = options.root ?? process.cwd();
   const defaultDay = options.day ?? today();
+  const reloadVersion = options.reloadVersion ?? `${Date.now()}`;
 
   return http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
       if (request.method === "GET" && url.pathname === "/") {
-        return sendText(response, 200, renderPage({ defaultDay }), "text/html; charset=utf-8");
+        return sendText(response, 200, renderPage({ defaultDay, reloadVersion }), "text/html; charset=utf-8");
       }
 
       if (request.method === "GET" && url.pathname === "/api/analysis-days") {
         return sendJson(response, 200, {
           schemaVersion: "analysis-days.v1",
           days: listAnalysisDays(root)
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/reload-version") {
+        return sendJson(response, 200, {
+          schemaVersion: "ui-reload-version.v1",
+          version: reloadVersion
         });
       }
 
@@ -58,6 +66,17 @@ export function createSkillUiServer(options = {}) {
           approve: true
         });
         return sendJson(response, 200, result);
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/preview") {
+        const body = await readJsonBody(request);
+        const bundle = buildPreviewBundle({
+          root,
+          day: body.day,
+          proposalId: body.proposalId,
+          proposalSet: body.proposalSet
+        });
+        return sendJson(response, 200, bundle);
       }
 
       if (request.method === "GET" && url.pathname === "/api/download") {
@@ -152,6 +171,25 @@ function readCommonTaskSummaries({ root, day }) {
 
 function buildDownloadBundle({ root, day, proposalId }) {
   const { proposals } = readSkillProposalSet({ root, day });
+  const bundle = buildArtifactBundle({ root, day, proposalId, proposals, schemaVersion: "skill-download-bundle.v1" });
+  assertPrivacySafe(bundle, "skillDownloadBundle");
+  return bundle;
+}
+
+function buildPreviewBundle({ root, day, proposalId, proposalSet }) {
+  const source = proposalSet?.proposals ? proposalSet : readSkillProposalSet({ root, day }).proposalSet;
+  const bundle = buildArtifactBundle({
+    root,
+    day,
+    proposalId,
+    proposals: source.proposals,
+    schemaVersion: "skill-preview-bundle.v1"
+  });
+  assertPrivacySafe(bundle, "skillPreviewBundle");
+  return bundle;
+}
+
+function buildArtifactBundle({ root, day, proposalId, proposals, schemaVersion }) {
   const proposal = selectSkillProposal(proposals, proposalId);
   const exportRoot = path.join(root, "output", "skills", day, proposal.id);
   const taskContexts = buildTaskSkillSummary({ root, day }).commonTasks.filter((task) => (
@@ -159,7 +197,7 @@ function buildDownloadBundle({ root, day, proposalId }) {
   ));
   const artifacts = buildSkillArtifacts({ day, proposal, exportRoot, taskContexts });
   const bundle = {
-    schemaVersion: "skill-download-bundle.v1",
+    schemaVersion,
     day,
     proposalId: proposal.id,
     title: proposal.title,
@@ -170,7 +208,6 @@ function buildDownloadBundle({ root, day, proposalId }) {
       content: artifact.content
     }))
   };
-  assertPrivacySafe(bundle, "skillDownloadBundle");
   return bundle;
 }
 
@@ -270,7 +307,7 @@ function sendBinary(response, status, body, contentType) {
   response.end(body);
 }
 
-function renderPage({ defaultDay }) {
+function renderPage({ defaultDay, reloadVersion }) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -333,6 +370,9 @@ function renderPage({ defaultDay }) {
     .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
     .status { min-height: 22px; color: var(--muted); font-size: 13px; }
     .warning { color: var(--warn); }
+    .preview-toolbar { display: grid; grid-template-columns: minmax(220px, 420px) auto; gap: 8px; align-items: end; margin-bottom: 10px; }
+    .preview-content { border: 1px solid var(--line); background: #fff; min-height: 420px; max-height: 70vh; overflow: auto; padding: 12px; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; }
+    .preview-empty { border: 1px solid var(--line); background: #fff; padding: 12px; color: var(--muted); }
     .files { display: grid; gap: 6px; margin-top: 8px; }
     .file { border: 1px solid var(--line); padding: 8px; background: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
     @media (max-width: 820px) {
@@ -395,6 +435,7 @@ function renderPage({ defaultDay }) {
       <h1 id="editor-heading">Select a proposal</h1>
       <div class="actions">
         <button id="save" class="primary" disabled>Save edits</button>
+        <button id="preview-skills" disabled>Preview skill files</button>
         <button id="generate" disabled>Generate skill files</button>
         <button id="download" disabled>Download bundle</button>
       </div>
@@ -428,6 +469,13 @@ function renderPage({ defaultDay }) {
         <div id="evidence-frame-links" class="wide evidence-links field-frame-links"></div>
         <div id="editor-frame-links" class="wide evidence-links"></div>
       </section>
+      <section id="preview-panel" hidden>
+        <div class="preview-toolbar">
+          <label>Skill file <select id="preview-file"></select></label>
+          <button id="refresh-preview" type="button" disabled>Refresh preview</button>
+        </div>
+        <pre id="preview-content" class="preview-content"></pre>
+      </section>
       <section>
         <h2>Generated Files</h2>
         <div id="files" class="files"></div>
@@ -436,7 +484,7 @@ function renderPage({ defaultDay }) {
   </div>
   <script>
     const fields = {};
-    const state = { proposalSet: null, commonTasks: [], rawFrameEvidenceIds: new Set(), selectedId: null, generated: null };
+    const state = { proposalSet: null, commonTasks: [], rawFrameEvidenceIds: new Set(), selectedId: null, generated: null, preview: null, previewFilePath: null };
     const ids = ["id", "category", "title", "summary-field", "steps", "outcome", "minutes", "confidence", "owner", "metric", "prerequisites", "evidence"];
     for (const id of ids) fields[id] = document.getElementById(id);
 
@@ -446,10 +494,17 @@ function renderPage({ defaultDay }) {
     const confidenceFilter = document.getElementById("confidence-filter");
     const searchInput = document.getElementById("search");
     const defaultDay = ${JSON.stringify(defaultDay)};
+    const serverReloadVersion = ${JSON.stringify(reloadVersion)};
     document.getElementById("load").addEventListener("click", load);
     document.getElementById("save").addEventListener("click", save);
+    document.getElementById("preview-skills").addEventListener("click", previewSkills);
     document.getElementById("generate").addEventListener("click", generate);
     document.getElementById("download").addEventListener("click", downloadBundle);
+    document.getElementById("refresh-preview").addEventListener("click", previewSkills);
+    document.getElementById("preview-file").addEventListener("change", (event) => {
+      state.previewFilePath = event.target.value;
+      renderPreviewContent();
+    });
     sortInput.addEventListener("change", render);
     categoryFilter.addEventListener("change", render);
     confidenceFilter.addEventListener("change", render);
@@ -466,6 +521,8 @@ function renderPage({ defaultDay }) {
       state.rawFrameEvidenceIds = new Set(data.rawFrameEvidenceIds ?? []);
       state.selectedId = state.proposalSet.proposals[0]?.id ?? null;
       state.generated = null;
+      state.preview = null;
+      state.previewFilePath = null;
       render();
       setStatus("Loaded " + state.proposalSet.proposals.length + " proposal(s).");
     }
@@ -489,10 +546,11 @@ function renderPage({ defaultDay }) {
         button.innerHTML = '<div class="proposal-title"></div><div class="meta"></div>';
         button.querySelector(".proposal-title").textContent = proposal.title;
         button.querySelector(".meta").textContent = proposal.category + " · confidence " + formatConfidence(proposal.confidence) + " · " + proposal.estimatedMinutesPerWeek + " min/week";
-        button.addEventListener("click", () => { state.selectedId = proposal.id; state.generated = null; render(); });
+        button.addEventListener("click", () => { state.selectedId = proposal.id; state.generated = null; state.preview = null; state.previewFilePath = null; render(); });
         list.appendChild(button);
       });
       renderEditor();
+      renderPreview();
       renderFiles();
     }
 
@@ -524,6 +582,8 @@ function renderPage({ defaultDay }) {
           skillRow.addEventListener("click", () => {
             state.selectedId = skill.id;
             state.generated = null;
+            state.preview = null;
+            state.previewFilePath = null;
             render();
           });
           skills.appendChild(skillRow);
@@ -582,8 +642,10 @@ function renderPage({ defaultDay }) {
       const proposal = selectedProposal();
       document.getElementById("editor").hidden = !proposal;
       document.getElementById("save").disabled = !proposal;
+      document.getElementById("preview-skills").disabled = !proposal;
       document.getElementById("generate").disabled = !proposal;
       document.getElementById("download").disabled = !proposal;
+      document.getElementById("refresh-preview").disabled = !proposal;
       document.getElementById("editor-heading").textContent = proposal ? proposal.title : "Select a proposal";
       if (!proposal) return;
       fields.id.value = proposal.id;
@@ -615,8 +677,11 @@ function renderPage({ defaultDay }) {
       proposal.rolloutMetric = fields.metric.value;
       proposal.prerequisites = lines(fields.prerequisites.value);
       proposal.evidenceIds = lines(fields.evidence.value);
+      state.preview = null;
+      state.previewFilePath = null;
       renderListOnly();
       renderEditorFrameLinks(proposal);
+      if (!document.getElementById("preview-panel").hidden) renderPreview();
     }
 
     function renderListOnly() {
@@ -662,10 +727,57 @@ function renderPage({ defaultDay }) {
       setStatus("Generated " + data.filesWritten.length + " file(s).");
     }
 
+    async function previewSkills() {
+      const proposal = selectedProposal();
+      if (!proposal) return;
+      syncFromEditor();
+      setStatus("Building skill file preview...");
+      const response = await fetch("/api/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ day: dayInput.value, proposalId: proposal.id, proposalSet: state.proposalSet })
+      });
+      const data = await response.json();
+      if (!response.ok) return setStatus(data.error, true);
+      state.preview = data;
+      state.previewFilePath = data.files?.[0]?.path ?? null;
+      document.getElementById("preview-panel").hidden = false;
+      renderPreview();
+      setStatus("Previewed " + (data.files?.length ?? 0) + " skill file(s). No files were written.");
+    }
+
     function downloadBundle() {
       const proposal = selectedProposal();
       if (!proposal) return;
       window.location.href = "/api/download?day=" + encodeURIComponent(dayInput.value) + "&proposalId=" + encodeURIComponent(proposal.id);
+    }
+
+    function renderPreview() {
+      const select = document.getElementById("preview-file");
+      select.innerHTML = "";
+      const files = state.preview?.files ?? [];
+      if (files.length === 0) {
+        document.getElementById("preview-content").textContent = selectedProposal()
+          ? "Open this tab or click Refresh preview to render the skill files before generating them."
+          : "Select a proposal to preview its skill files.";
+        return;
+      }
+      for (const file of files) {
+        const option = document.createElement("option");
+        option.value = file.path;
+        option.textContent = file.target + " · " + file.path;
+        select.appendChild(option);
+      }
+      if (!files.some((file) => file.path === state.previewFilePath)) {
+        state.previewFilePath = files[0].path;
+      }
+      select.value = state.previewFilePath;
+      renderPreviewContent();
+    }
+
+    function renderPreviewContent() {
+      const file = (state.preview?.files ?? []).find((item) => item.path === state.previewFilePath);
+      document.getElementById("preview-content").textContent = file?.content ?? "No preview file selected.";
     }
 
     function renderFiles() {
@@ -770,6 +882,22 @@ function renderPage({ defaultDay }) {
     }
 
     loadDays();
+    startReloadPolling();
+
+    function startReloadPolling() {
+      window.setInterval(async () => {
+        try {
+          const response = await fetch("/api/reload-version", { cache: "no-store" });
+          if (!response.ok) return;
+          const data = await response.json();
+          if (data.version && data.version !== serverReloadVersion) {
+            window.location.reload();
+          }
+        } catch {
+          // The watched UI server may be between restarts; the next poll will reconnect.
+        }
+      }, 1500);
+    }
 
     async function loadDays() {
       setStatus("Loading analysis days...");

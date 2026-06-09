@@ -20,6 +20,7 @@ DELETE_RAW_MEDIA ?= 0
 APPROVE_EXPORT ?= 0
 PROPOSAL ?=
 UI_PORT ?= 4173
+UI_WATCH ?= 1
 CODEX_BIN ?= codex
 NODE ?= node
 NPM ?= npm
@@ -35,7 +36,7 @@ help:
 	@echo "  make debug-frame DAY=$(DAY) DEBUG_FRAME=<obs-or-evidence-id> # analyse one raw screenshot and print the prompt/output"
 	@echo "  make model-eval     # compare OpenAI models for weekly efficiency report quality"
 	@echo "  make verify-mmp     # validate the repeated-task evidence-to-skill MMP gate"
-	@echo "  make ui             # edit, generate, and download skill proposals in a local web UI"
+	@echo "  make ui             # edit, generate, and download skill proposals in a watched local web UI"
 
 dirs:
 	@mkdir -p logs/ralf storage output "$(DEBUG_DIR)"
@@ -213,7 +214,11 @@ export-skill: build
 
 ui: build
 	@if [ -f "$(CLI)" ]; then \
-		$(NODE) "$(CLI)" ui --day "$(DAY)" --port "$(UI_PORT)"; \
+		if [ "$(UI_WATCH)" = "1" ]; then \
+			$(NODE) --watch "$(CLI)" ui --day "$(DAY)" --port "$(UI_PORT)"; \
+		else \
+			$(NODE) "$(CLI)" ui --day "$(DAY)" --port "$(UI_PORT)"; \
+		fi; \
 	else \
 		echo "Lucille CLI not found at $(CLI); skill UI is unavailable until scaffolded."; \
 	fi

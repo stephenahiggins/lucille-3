@@ -182,6 +182,8 @@ make ui DAY=2026-06-01
 
 Open the printed local URL. The UI reads the repeated-task summary and writes approved proposal/export changes:
 
+`make ui` watches the local UI source by default. When server code changes, Node restarts the UI process and the open browser page reloads automatically. Use `UI_WATCH=0 make ui DAY=2026-06-01` to run the non-watching server.
+
 - `storage/analysis/<DAY>/skill-proposals.json`
 - `storage/analysis/<DAY>/task-skill-summary.json`
 - `output/skills/<DAY>/<PROPOSAL_ID>/`
